@@ -79,3 +79,58 @@ Row-level security is enabled on all tables. Users can only read/write their own
 - Community reports older than 14 days weighted lower in rankings
 - Trip gear overrides must never mutate the saved profile
 - All API keys in `.env.local`, never hardcoded
+
+
+## Session Decisions Log
+
+### Architectural Decisions
+
+**Supabase Auth over NextAuth/Clerk**
+Spec listed NextAuth.js or Clerk — built with Supabase Auth instead. Rationale: first-class Supabase Postgres integration, shared RLS context, `auth.uid()` works in policies directly, `@supabase/ssr` handles SSR session refresh with no extra config. Trade-off: OAuth/magic link setup is more Supabase-specific vs. NextAuth's provider abstractions.
+
+**Always use `getUser()`, never `getSession()` on the server**
+`getSession()` reads the JWT from the cookie without network validation and can be spoofed. `getUser()` validates the token against Supabase. This must be maintained everywhere server-side, including middleware.
+
+**Gear sub-tables as normalized rows, not JSONB**
+`rods`, `reels`, `lines`, `leaders`, `fly_boxes` are separate tables with FK to `gear_profiles` — not JSONB arrays. This makes individual gear items queryable, updatable, and deletable without rewriting the full array.
+
+**Permissive RLS policy layering on `catch_reports`**
+Two policies coexist: `FOR SELECT USING (true)` (public reads) and three separate write policies scoped to `auth.uid() = user_id`. Supabase evaluates permissive policies with OR logic — authenticated users can read all reports, but only write their own. This is intentional.
+
+---
+
+### Deviations from Spec
+
+- **Auth:** Built with Supabase Auth, not NextAuth.js or Clerk
+- **Tailwind config:** Tailwind v4 dropped `tailwind.config.ts` — all theme customization lives in `globals.css` via `@theme` directives. Any reference to `tailwind.config.ts` is wrong.
+
+---
+
+### Known Gotchas — Do Not Repeat These Mistakes
+
+**Directory naming**
+`create-next-app` rejects capital letters in directory names (npm package name constraint). Scaffold into a lowercase subdirectory (e.g. `trout-ai/`), move files up, delete the subdir.
+
+**RLS policy syntax**
+`FOR INSERT UPDATE DELETE` is invalid PostgreSQL — `FOR` only accepts one command: `ALL | SELECT | INSERT | UPDATE | DELETE`. Use three separate policies or `FOR ALL`.
+
+**No `gear_profiles` row after signup**
+Supabase creates `auth.users` rows on signup but nothing creates a corresponding `gear_profiles` row. All gear queries return null until one exists. Fix: `handle_new_user()` trigger firing `AFTER INSERT ON auth.users`, declared `SECURITY DEFINER SET search_path = public`.
+
+**`updated_at` doesn't self-update**
+`DEFAULT NOW()` only fires on INSERT. Without a `BEFORE UPDATE` trigger calling `set_updated_at()`, the `gear_profiles.updated_at` column stays frozen at creation time forever.
+
+**`turbopack.root` config location**
+`turbopack.root` is a top-level `NextConfig` key — not under `experimental`. Placing it under `experimental` causes a TypeScript error and failed build.
+
+**Multiple `package-lock.json` files**
+If any ancestor directory has its own `package-lock.json`, Next.js 16 warns about workspace root detection on every build. Suppress with `turbopack.root: path.resolve(__dirname)` in `next.config.ts`.
+
+**`next-env.d.ts` is gitignored**
+Auto-generated, should not be committed. `git add next-env.d.ts` requires `-f`.
+
+**GitHub branch case sensitivity**
+The GitHub API is case-sensitive for branch names. `"base": "Main"` returns a 422 if the remote branch is `main`. Always verify the exact remote branch name before creating PRs programmatically.
+
+**`gh` CLI may not be installed**
+GitHub CLI may not be in `$PATH`. Fall back to Python `urllib` using credentials from `git credential fill` if needed.
