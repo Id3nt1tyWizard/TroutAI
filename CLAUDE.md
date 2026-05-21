@@ -97,19 +97,37 @@ Spec listed NextAuth.js or Clerk — built with Supabase Auth instead. Rationale
 **Permissive RLS policy layering on `catch_reports`**
 Two policies coexist: `FOR SELECT USING (true)` (public reads) and three separate write policies scoped to `auth.uid() = user_id`. Supabase evaluates permissive policies with OR logic — authenticated users can read all reports, but only write their own. This is intentional.
 
+**Server actions return `{ error?: string }`, not void**
+Each action destructures `{ error }` from the Supabase call and returns it. Client components wrap actions in async handlers to capture the result and display per-section error banners. Harmlessly ignored when used directly as `<form action={fn}>`.
+
+**`useSectionHandlers` hook + `*Fields` subcomponents for gear sections**
+All five gear sub-table sections share identical state shape: `showForm`, `editingId`, `error`, plus three handler wrappers — extracted to one hook. Each gear type has a `*Fields` subcomponent (e.g. `RodFields`) powering both add and edit forms via an `initial?` prop.
+
+**Inline row editing via `<td colSpan>`**
+Click Edit → entire `<tr>` is replaced with `<tr><td colSpan={N}>{form}</td></tr>`. Avoids modal complexity. Required because browsers strip bare `<form>` elements between `<tr>` rows.
+
+**Profile ID resolved server-side from auth user, never from form input**
+Every add action calls `getProfileId()` which looks up the gear_profile row via `auth.uid()`. No hidden `gear_profile_id` form field. Defense in depth — removes one thing a client can lie about.
+
+**Opening add closes active edit, and vice versa**
+Section state enforces mutual exclusivity — only one in-progress form per section at a time.
+
 ---
 
 ### Deviations from Spec
 
 - **Auth:** Built with Supabase Auth, not NextAuth.js or Clerk
 - **Tailwind config:** Tailwind v4 dropped `tailwind.config.ts` — all theme customization lives in `globals.css` via `@theme` directives. Any reference to `tailwind.config.ts` is wrong.
+- **`/gear` not in middleware matcher:** Middleware only guards `/dashboard`. The gear page does its own `getUser()` + redirect. Revisit if more protected routes accumulate.
+- **Tippet sizes are hardcoded:** UI checkbox set (0X–7X). Schema accepts arbitrary `text[]` but users can't enter custom designations via the UI.
+- **Fly box patterns use comma-separated input:** Splits on `,`, trims, filters empty. Pattern names containing literal commas are not representable.
 
 ---
 
 ### Known Gotchas — Do Not Repeat These Mistakes
 
 **Directory naming**
-`create-next-app` rejects capital letters in directory names (npm package name constraint). Scaffold into a lowercase subdirectory (e.g. `trout-ai/`), move files up, delete the subdir.
+`create-next-app` rejects capital letters in directory names. Scaffold into a lowercase subdirectory (e.g. `trout-ai/`), move files up, delete the subdir.
 
 **RLS policy syntax**
 `FOR INSERT UPDATE DELETE` is invalid PostgreSQL — `FOR` only accepts one command: `ALL | SELECT | INSERT | UPDATE | DELETE`. Use three separate policies or `FOR ALL`.
@@ -118,7 +136,7 @@ Two policies coexist: `FOR SELECT USING (true)` (public reads) and three separat
 Supabase creates `auth.users` rows on signup but nothing creates a corresponding `gear_profiles` row. All gear queries return null until one exists. Fix: `handle_new_user()` trigger firing `AFTER INSERT ON auth.users`, declared `SECURITY DEFINER SET search_path = public`.
 
 **`updated_at` doesn't self-update**
-`DEFAULT NOW()` only fires on INSERT. Without a `BEFORE UPDATE` trigger calling `set_updated_at()`, the `gear_profiles.updated_at` column stays frozen at creation time forever.
+`DEFAULT NOW()` only fires on INSERT. Without a `BEFORE UPDATE` trigger calling `set_updated_at()`, `gear_profiles.updated_at` stays frozen at creation time forever.
 
 **`turbopack.root` config location**
 `turbopack.root` is a top-level `NextConfig` key — not under `experimental`. Placing it under `experimental` causes a TypeScript error and failed build.
@@ -134,3 +152,18 @@ The GitHub API is case-sensitive for branch names. `"base": "Main"` returns a 42
 
 **`gh` CLI may not be installed**
 GitHub CLI may not be in `$PATH`. Fall back to Python `urllib` using credentials from `git credential fill` if needed.
+
+**OneDrive file lock on `.next/static/` during `next build`**
+`EPERM: operation not permitted` on a build artifact means OneDrive is holding the file from a previous build. Fix: `rm -rf .next` and rerun. Recurring on Windows + OneDrive setups.
+
+**`revalidatePath` does NOT reset client component state**
+When a server action calls `revalidatePath('/gear')`, the server re-renders with fresh data but `useState` values (`showForm`, `editingId`) persist. To auto-close a form after a successful submit, the client wrapper must explicitly call `setShowForm(false)` / `setEditingId(null)` — only after confirming no error, so failed submissions keep the form open.
+
+**Server actions used as `form.action` can't capture return values**
+`<form action={deleteRod.bind(null, id)}>` works but discards `{ error }`. To surface errors, wrap in a client handler: `<form action={() => handleDelete(id)}>` where `handleDelete` awaits the action and reads `res.error`.
+
+**RLS-blocked operations return success, not an error**
+If a crafted request tries to update/delete another user's row, Postgres updates 0 rows and Supabase returns `{ error: null }`. Error-surfacing won't catch this — only DB-level failures trigger error returns. Don't rely on error returns to confirm a privileged write actually happened.
+
+**Unused generics trigger `@typescript-eslint/no-unused-vars`**
+`function useSectionHandlers<T extends { id: string }>()` fails lint if `T` isn't referenced in the body. Drop unused generics — TypeScript doesn't need them for inference if parameter types are self-contained.
