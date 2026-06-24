@@ -11,6 +11,8 @@
  * record per day.
  */
 
+import { fetchJson } from '../http'
+
 const DEFAULT_BASE_URL = 'https://api.open-meteo.com/v1'
 
 /** Daily variables we request, in the order Open-Meteo returns them. */
@@ -120,13 +122,7 @@ export async function getForecast(
   if (includeCurrent) params.set('current', CURRENT_VARS.join(','))
 
   const url = `${baseUrl()}/forecast?${params.toString()}`
-  const res = await fetch(url, { headers: { Accept: 'application/json' } })
-
-  if (!res.ok) {
-    throw new Error(`Weather forecast failed (${res.status}): ${await res.text()}`)
-  }
-
-  const data = (await res.json()) as RawForecastResponse
+  const data = await fetchJson<RawForecastResponse>(url)
 
   return {
     latitude: data.latitude,

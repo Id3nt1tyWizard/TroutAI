@@ -6,6 +6,8 @@
  * be invoked with concrete lat/lon. No API key required.
  */
 
+import { fetchJson } from '../http'
+
 const DEFAULT_BASE_URL = 'https://geocoding-api.open-meteo.com/v1'
 
 export interface GeocodeResult {
@@ -77,13 +79,7 @@ export async function geocode(
   if (options.countryCode) params.set('countryCode', options.countryCode)
 
   const url = `${baseUrl()}/search?${params.toString()}`
-  const res = await fetch(url, { headers: { Accept: 'application/json' } })
-
-  if (!res.ok) {
-    throw new Error(`Geocoding failed (${res.status}): ${await res.text()}`)
-  }
-
-  const data = (await res.json()) as RawGeocodeResponse
+  const data = await fetchJson<RawGeocodeResponse>(url)
   if (!data.results) return []
 
   return data.results.map(normalize)
