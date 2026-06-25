@@ -167,3 +167,83 @@ If a crafted request tries to update/delete another user's row, Postgres updates
 
 **Unused generics trigger `@typescript-eslint/no-unused-vars`**
 `function useSectionHandlers<T extends { id: string }>()` fails lint if `T` isn't referenced in the body. Drop unused generics — TypeScript doesn't need them for inference if parameter types are self-contained.
+
+## Session Decisions Log — Stage 3 (API Integrations)
+
+### Architectural Decisions
+
+**USGS OGC API for real-time, legacy Statistics service for percentiles (dual endpoint)**
+Real-time readings + gage discovery use the OGC API (`api.waterdata.usgs.gov/ogcapi/v0`, GeoJSON, keyless). The historical percentile baseline used to classify flow *status* comes from the legacy USGS Statistics service (`waterservices.usgs.gov/nwis/stat`) — the OGC API exposes only raw daily values (statistic `00003` = mean), not pre-computed percentiles. Two endpoints by necessity, not accident.
+
+**`getStreamConditions(bbox)` is the planner-facing aggregator**
+Low-level building blocks (`findStreamGages`, `getLatestStreamflow`, `getFlowPercentiles`, `groupReadingsByGage`) stay exposed, but the planner should call `getStreamConditions`, which joins gages + live readings + flow status, drops gages with no current data, and surfaces water temp in °F. This is what satisfies the "never recommend a spot without checking streamflow status" non-negotiable.
+
+**Flow status via USGS WaterWatch percentile bands**
+`classifyFlow()` grades current discharge against p10/p25/p50/p75/p90 into much-below / below / normal / above / much-above normal, plus % of median. Same convention USGS WaterWatch uses.
+
+**Supplementary data degrades gracefully, never fails the call**
+If the Statistics service is slow/down, `getStreamConditions` returns live readings with `status: null` rather than throwing. The percentile baseline is supplementary; losing it must not lose the real-time data.
+
+**bbox one-shot regional queries**
+`latest-continuous` accepts a `bbox`, so current readings for every gage in a region come back in a single request — no per-gage looping. `boundingBox(lat, lon, miles)` from the geo wrapper is the hand-off contract (`{west, south, east, north}`, structurally identical to what USGS expects).
+
+**Shared `src/lib/http.ts` for all external fetches**
+One helper with AbortController timeout + bounded retry on transient failures (network error, timeout, 429, 5xx), used by geo, weather, and usgs. The Step 4 agent fans out many calls per trip; a hung upstream must not stall it.
+
+**Wrapper conventions (all three)**
+Typed `Raw*` interfaces normalized into clean public interfaces; base URL overridable via env var with a sensible default; throw on non-2xx (so the agent surfaces it); return empty array / null on no-data. Weather additionally pivots Open-Meteo's column-oriented arrays into row-oriented daily records, forces imperial units at the query layer, and decodes WMO codes to plain English.
+
+**Water temperature in the default fetch**
+Param `00010` (water temp) is fetched by default alongside discharge/gage-height — it's a top-tier trout variable. Raw readings stay faithful (°C); `getStreamConditions` surfaces a converted °F value.
+
+**Pagination via OGC `next` links**
+`fetchFeatures` follows `next` links (capped) so dense regions aren't silently truncated at the page limit.
+
+**Vitest for unit tests**
+Added `vitest` + `npm test`. Tests cover pure logic only (no network): flow classification, percentile RDB parsing, °C→°F, bounding-box math, WMO decoding.
+
+---
+
+### Deviations from Spec
+
+- **Geocoding lives in `src/lib/geo/`** — the documented project structure lists only `lib/usgs/` and `lib/weather/` for Step 3. Geocoding got its own directory.
+- **USGS env vars renamed** — replaced `USGS_BASE_URL` (legacy waterservices) and `OPEN_METEO_BASE_URL` with the names the code actually reads: `USGS_OGC_BASE_URL`, `USGS_STATS_BASE_URL`, `OPEN_METEO_GEOCODING_BASE_URL`, `OPEN_METEO_FORECAST_BASE_URL`. All optional; wrappers default to them.
+- **`npm test` added** — dev commands previously listed only dev/build/lint.
+- **`.env.local.example` is now tracked** — added `!.env.local.example` to `.gitignore` to exempt the (placeholder-only) template from the broad `.env*` ignore, so it's shareable. The real `.env.local` stays ignored.
+
+---
+
+### Known Gotchas — Do Not Repeat These Mistakes
+
+**OneDrive transient lock on directory deletion during `git checkout`**
+Switching branches prints `Deletion of directory '...' failed` for folders that should be removed (e.g. `src/lib/geo`). Git deletes the *files* fine but can't `rmdir` the now-empty folders while OneDrive holds a handle. Harmless and not data loss — the content is in the other branch. Fix: answer `n`, then `rmdir` the empty dirs once the lock releases. (Same root cause as the documented `.next/static` EPERM gotcha — a different manifestation.)
+
+**`Number('') === 0`, not `NaN`**
+Empty cells in the USGS Statistics RDB were parsed as a flow of `0` instead of `null`, skewing status classification. Guard for empty/whitespace strings *before* calling `Number()`. (Caught by a unit test — the reason tests were worth adding.)
+
+**Open-Meteo geocoding is weak on compound and ambiguous names**
+`"Madison River, Montana"` returns 0 results (it matches a single place name and ignores the comma); single names can mis-resolve (`"Ennis"` → "Surprise, Arizona"). Disambiguation belongs in the Step 4 planner UX, not the wrapper.
+
+**USGS OGC `value` is a string**
+The `value` field comes back as `"1240"`, not a number — parse it.
+
+**GeoJSON coordinates are `[longitude, latitude]`**
+Lon first, lat second. Destructure in that order when normalizing gage geometry.
+
+**`waterservices.usgs.gov` (stat host) is slow/flaky**
+Connection can exceed undici's default 10s connect timeout — hence the retry + graceful degradation. The OGC host (`api.waterdata.usgs.gov`) is fast by contrast; don't assume both behave the same.
+
+**Git Bash `/tmp` ≠ Windows Python `/tmp`**
+A Windows-native exe (e.g. `python`) interprets `/tmp/x` as `C:\tmp\x`, not Git Bash's temp dir. Write temp files in the project cwd when a Windows program will read them back.
+
+**TypeScript TS7022 circular-inference with reassigned loop vars**
+`const data = await fetchJson<T>(next, ...)` where `next` is later reassigned from `data.links` triggers "implicitly any / referenced in its own initializer." Fix: annotate the const — `const data: T = await fetchJson(next, ...)`.
+
+**`.env.local.example` had real-looking secrets but was never committed**
+The broad `.env*` rule ignored the example file too, so nothing leaked — but it also meant the template wasn't shareable. Scrub real values to placeholders *before* adding the `!.env.local.example` exemption.
+
+**(Reconfirmed) `gh` CLI not installed**
+Fell back to the GitHub REST API using the token from `git credential fill`. Works for push + PR creation.
+
+**(Reconfirmed) GitHub branch case sensitivity**
+Verified `default_branch` via the API (`main`, lowercase) before creating the PR with `"base": "main"`.
