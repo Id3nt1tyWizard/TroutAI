@@ -294,11 +294,25 @@ Push the entire `final.content` (thinking + tool_use) back into `messages` befor
 
 **`ANTHROPIC_API_KEY` fails late by default** — `getAnthropicClient()` throws a clear, user-facing error if the key is missing rather than letting the SDK fail deep in a request; the agent surfaces it as an `error` event.
 
+**Spec model was already retired** — `claude-sonnet-4-20250514` retired 2026-06-15 and 404s. Verify model IDs against a current source before coding; don't trust a spec's pinned model string.
+
+**A prompt instruction is not a guarantee for a "never/always" rule** — the model can skip it. Enforce non-negotiables in code (a deterministic `notice` event + a corrective user turn), not just in the system prompt. See the enforcement notes below.
+
+**"Called a tool without error" ≠ "got useful data"** — `get_stream_conditions` returns `isError: false` even with zero gages, so a naive success check silently accepts an empty result. Guard on the payload, not just the error flag.
+
+**Vitest doesn't read tsconfig `paths`** — `@/` imports fail in tests until `vitest.config.ts` maps `@` → `./src` (added this stage). Mocking the agent's collaborators uses `vi.hoisted` + `vi.mock('./client')` / `vi.mock('./tools')` so scripted model turns drive the loop without network or a real SDK.
+
+**Committing alongside concurrent edits** — when work happens in parallel, keep your change set in files the other work isn't touching and stage explicitly (`git add <files>`, never `git add -A`); partial staging of an entangled file is impractical non-interactively. This stage, the enforcement commit was scoped to `agent.ts` + `agent.test.ts` only, because `route.ts`, `tools.ts`, and `CLAUDE.md` were mid-edit for the granular-gear work.
+
 ### Stage 4 Revisions (post-review hardening)
 
-**Non-negotiables now enforced in code, not just prompted**
-- *Regulations warning:* emitted deterministically as a `notice` event from `agent.ts` on every initial plan (constant `REGULATIONS_WARNING` in `prompt.ts`), rendered as an amber banner — guaranteed present regardless of model output. The system prompt tells the model NOT to write its own long regs section (keeps the itinerary short and avoids duplication).
-- *Streamflow-before-spot:* the loop tracks whether `get_stream_conditions` succeeded; if the initial plan tries to finish (`stop_reason !== 'tool_use'`) without it, the agent injects one corrective user turn forcing the check before allowing `done`. One-shot (`correctionUsed`) to avoid loops.
+**Non-negotiables now enforced in code, not just prompted** — enforcement keys off what the model did *in the turn*, not "is this the first message" (an earlier initial-plan-only gate was itself a bug: conversational follow-ups like "plan the Gallatin instead" bypassed both guarantees).
+- *Regulations warning:* emitted deterministically as a `notice` event from `agent.ts` (constant `REGULATIONS_WARNING` in `prompt.ts`) the moment the model starts trip research (any of `geocode_place`/`get_stream_conditions`/`get_weather_forecast`/`get_hatch_data`), so it precedes any itinerary and re-fires on new-spot follow-ups. Rendered as an amber banner the UI keeps visible. The system prompt tells the model NOT to write its own long regs section.
+- *Streamflow-before-spot:* if the model located water (`geocode_place`) but tries to finish (`stop_reason !== 'tool_use'`) without a **data-bearing** flow check, the agent injects one corrective user turn forcing the check before allowing `done`. Applies to any spot-recommending turn, not just the initial plan. One-shot (`correctionUsed`) to avoid loops.
+- *Empty ≠ checked:* a `get_stream_conditions` call that returns zero gages comes back `isError: false`, so a naive "called && !error" test would falsely count it. `streamflowHasData()` requires `gageCount > 0` / non-empty `gages`; an empty result forces the one correction instead of proceeding blind.
+
+**Agent-loop tests (`agent.test.ts`)**
+The enforcement/correction logic is the highest-risk code, so it's unit-tested with `./client` and `./tools` mocked — scripted model turns drive the loop with no network. Covers: correction fires when streamflow is skipped, no double-correction when data was returned, empty-result triggers exactly one correction, one-shot give-up instead of looping, non-planning follow-ups aren't enforced/warned, new-spot follow-ups are, and refusal surfaces as an `error`.
 
 **Hatch data is now real (curated dataset, not a stub)**
 `src/lib/hatches/` — a typed month-keyed hatch calendar (19 hatches) assembled from published regional charts, with a West/East split at the ~100th meridian (`regionForLongitude`). `getHatches({month, longitude})` filters by month + region. `get_hatch_data` derives the month from the trip date and longitude from geocode, returns `integrated: true`. Swap the dataset for a live feed later without changing the tool. (Only `check_regulations` remains a stub — real regs are Step 7.)
@@ -318,6 +332,7 @@ No `catch_reports` tool (site has no users yet). The 14-day-weighting rule stays
 ### Deviations from Spec (Stage 4 revisions)
 
 - **`src/lib/hatches/`** — hatch data got its own lib directory (like `geo/` in Step 3); the documented structure didn't list one. Curated dataset, not a live API (none exists free).
+- **"Real-time hatch data" (Overview) is unachievable** — there is no free live hatch feed, so the planner uses curated-seasonal data with a "confirm with a local fly shop" caveat rather than a real-time source.
 - **`vitest.config.ts`** added so tests resolve the `@/` alias.
 
 ## Session Decisions Log — Granular Gear Model (migration 002)
