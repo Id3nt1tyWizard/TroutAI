@@ -80,7 +80,7 @@ export const plannerTools: Anthropic.Tool[] = [
   {
     name: 'get_gear_profile',
     description:
-      "Fetch the signed-in angler's saved gear: rods, reels, lines, leaders, fly boxes, wading setup, and tippet sizes. Match recommendations to this and flag mismatches.",
+      "Fetch the signed-in angler's saved gear: rods (weight/action), reels, lines (type/taper/sink rate), leaders (tippet X), tippet spools, wading setup, and individual flies (pattern, category, hook size, what they imitate, quantity). Match recommendations to this and flag mismatches — e.g. rod/line/reel weight balance, fly hook size vs. available tippet X (hook ÷ 4 ≈ X), line type vs. water depth.",
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -223,15 +223,36 @@ async function toolGearProfile(ctx: ToolContext) {
   if (!profile) {
     return { found: false, note: 'No gear profile found for this angler.' }
   }
+  const boxLabel = new Map(profile.fly_boxes.map((b) => [b.id, b.label]))
   return {
     found: true,
     wadingSetup: profile.wading_setup,
-    tippetSizes: profile.tippet_sizes,
-    rods: profile.rods.map((r) => ({ make: r.make, lengthFt: r.length_ft, weightClass: r.weight_class })),
-    reels: profile.reels.map((r) => ({ make: r.make, lineWeight: r.line_weight })),
-    lines: profile.lines.map((l) => ({ type: l.type, weight: l.weight })),
-    leaders: profile.leaders.map((l) => ({ material: l.material, lengthFt: l.length_ft })),
-    flyBoxes: profile.fly_boxes.map((f) => ({ category: f.category, patterns: f.patterns })),
+    tippet: profile.tippet_spools.map((t) => ({
+      xSize: t.x_size,
+      material: t.material,
+      breakingLb: t.breaking_lb,
+      lowStock: t.low_stock,
+    })),
+    rods: profile.rods.map((r) => ({
+      make: r.make,
+      model: r.model,
+      lengthFt: r.length_ft,
+      weightClass: r.weight_class,
+      action: r.action,
+    })),
+    reels: profile.reels.map((r) => ({ make: r.make, model: r.model, lineWeight: r.line_weight, arbor: r.arbor })),
+    lines: profile.lines.map((l) => ({ type: l.type, weight: l.weight, taper: l.taper, sinkIps: l.sink_ips })),
+    leaders: profile.leaders.map((l) => ({ material: l.material, lengthFt: l.length_ft, tippetX: l.tippet_x })),
+    flies: profile.flies.map((f) => ({
+      pattern: f.pattern,
+      category: f.category,
+      hookSize: f.hook_size,
+      color: f.color,
+      weighted: f.weighted,
+      quantity: f.quantity,
+      imitates: f.imitates,
+      box: f.box_id ? boxLabel.get(f.box_id) ?? null : null,
+    })),
   }
 }
 

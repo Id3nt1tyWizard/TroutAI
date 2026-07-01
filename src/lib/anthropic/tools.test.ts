@@ -61,13 +61,33 @@ describe('get_gear_profile', () => {
       id: 'p1',
       user_id: 'u1',
       wading_setup: 'waders',
-      tippet_sizes: ['4X', '5X'],
+      fly_sort: 'category',
       updated_at: '2026-06-25T00:00:00Z',
-      rods: [{ id: 'r1', gear_profile_id: 'p1', make: 'Sage', length_ft: 9, weight_class: 5 }],
-      reels: [{ id: 're1', gear_profile_id: 'p1', make: 'Lamson', line_weight: 5 }],
-      lines: [{ id: 'l1', gear_profile_id: 'p1', type: 'floating', weight: 5 }],
-      leaders: [{ id: 'le1', gear_profile_id: 'p1', material: 'fluoro', length_ft: 9 }],
-      fly_boxes: [{ id: 'f1', gear_profile_id: 'p1', category: 'dry', patterns: ['Adams'] }],
+      rods: [
+        { id: 'r1', gear_profile_id: 'p1', make: 'Sage', model: null, length_ft: 9, weight_class: 5, action: 'fast', pieces: 4 },
+      ],
+      reels: [{ id: 're1', gear_profile_id: 'p1', make: 'Lamson', model: null, line_weight: 5, arbor: 'large' }],
+      lines: [{ id: 'l1', gear_profile_id: 'p1', type: 'floating', weight: 5, taper: 'WF', sink_ips: null }],
+      leaders: [{ id: 'le1', gear_profile_id: 'p1', material: 'fluoro', length_ft: 9, tippet_x: '5X' }],
+      fly_boxes: [{ id: 'b1', gear_profile_id: 'p1', label: 'Dry box' }],
+      flies: [
+        {
+          id: 'f1',
+          gear_profile_id: 'p1',
+          box_id: 'b1',
+          pattern: 'Adams',
+          category: 'dry',
+          hook_size: 16,
+          color: 'gray',
+          weighted: false,
+          quantity: 6,
+          imitates: 'baetis',
+          created_at: '2026-06-25T00:00:00Z',
+        },
+      ],
+      tippet_spools: [
+        { id: 't1', gear_profile_id: 'p1', x_size: '5X', material: 'fluoro', breaking_lb: 4.5, low_stock: false },
+      ],
     }
     const ctx: ToolContext = { getGearProfile: async () => profile }
 
@@ -75,8 +95,18 @@ describe('get_gear_profile', () => {
     const data = parse(res.content)
     expect(data.found).toBe(true)
     expect(data.wadingSetup).toBe('waders')
-    expect(data.rods[0]).toEqual({ make: 'Sage', lengthFt: 9, weightClass: 5 })
-    expect(data.flyBoxes[0]).toEqual({ category: 'dry', patterns: ['Adams'] })
+    expect(data.rods[0]).toEqual({ make: 'Sage', model: null, lengthFt: 9, weightClass: 5, action: 'fast' })
+    expect(data.tippet[0]).toEqual({ xSize: '5X', material: 'fluoro', breakingLb: 4.5, lowStock: false })
+    expect(data.flies[0]).toEqual({
+      pattern: 'Adams',
+      category: 'dry',
+      hookSize: 16,
+      color: 'gray',
+      weighted: false,
+      quantity: 6,
+      imitates: 'baetis',
+      box: 'Dry box',
+    })
   })
 })
 

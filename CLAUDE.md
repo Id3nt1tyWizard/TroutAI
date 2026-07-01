@@ -57,11 +57,13 @@ supabase/
 - Never call `getSession()` on the server — always use `getUser()` (authoritative)
 
 ## Database
-Schema is in `supabase/migrations/001_initial_schema.sql`. Apply it in the Supabase project's SQL editor.
+Schema is in `supabase/migrations/`. Apply migrations in order in the Supabase project's SQL editor: `001_initial_schema.sql`, then `002_richer_gear.sql`.
 
-Tables: `gear_profiles`, `rods`, `reels`, `lines`, `leaders`, `fly_boxes`, `catch_reports`
+Tables: `gear_profiles`, `rods`, `reels`, `lines`, `leaders`, `fly_boxes`, `flies`, `tippet_spools`, `catch_reports`
 
 Row-level security is enabled on all tables. Users can only read/write their own gear data. Catch reports are publicly readable.
+
+Migration `002` moved to a granular gear model: `flies` are first-class rows (flat by default, optional `box_id` grouping), `tippet_spools` replaces the old `gear_profiles.tippet_sizes` array, and `fly_boxes` became optional labeled containers. Preset vocabularies live in `src/lib/gear/presets.ts` (globally fixed) — the affected columns are plain TEXT (enum CHECKs relaxed) so users can also type custom values.
 
 ## Build Order
 1. ✅ Project scaffolding (Next.js + Tailwind + Supabase + Auth)
@@ -317,3 +319,40 @@ No `catch_reports` tool (site has no users yet). The 14-day-weighting rule stays
 
 - **`src/lib/hatches/`** — hatch data got its own lib directory (like `geo/` in Step 3); the documented structure didn't list one. Curated dataset, not a live API (none exists free).
 - **`vitest.config.ts`** added so tests resolve the `@/` alias.
+
+## Session Decisions Log — Granular Gear Model (migration 002)
+
+### Architectural Decisions
+
+**Flies are first-class rows, flat by default; boxes are optional containers**
+Replaced `fly_boxes.patterns TEXT[]` with a `flies` table (one row per fly: pattern, category, hook_size, color, weighted, quantity, imitates, nullable `box_id`). Flat list is the default; sort/group by category/name/size/box is a UI concern over the flat rows (persisted in `gear_profiles.fly_sort`). `fly_boxes` shrank to `{ id, gear_profile_id, label }` and `flies.box_id` is `ON DELETE SET NULL`, so deleting a box never destroys flies — they just go loose.
+
+**Tippet promoted from array to `tippet_spools` table**
+`gear_profiles.tippet_sizes TEXT[]` → `tippet_spools` (x_size, material, breaking_lb, low_stock). Tippet is the leader↔fly link; it needed material + stock to be matchable.
+
+**Expanded rod/reel/line/leader columns for matching**
+rods +model/action/pieces, reels +model/arbor, lines +taper/sink_ips, leaders +tippet_x. These are the attributes the planner needs to speak concrete gear-match sentences (weight balance, hook-size÷4≈tippet-X, line type vs. depth).
+
+**Globally-fixed presets + custom free text → no DB enums**
+Preset vocabularies live in `src/lib/gear/presets.ts` (code-curated, not user-extensible). Because the "custom typed option" requirement means any value is legal, the enum `CHECK` constraints on category/type/material were dropped and those columns are plain TEXT. The UI offers presets via `<input list>` + `<datalist>` (a combobox that still accepts free text). Matching keys off preset values; custom values simply don't participate in automated matching.
+
+**Migration backfills before dropping source columns**
+`002` explodes `fly_boxes.patterns` → `flies` rows (keeping the box as container, seeding a label from the old category) and `tippet_sizes` → mono `tippet_spools`, *then* drops the old array columns. Wrapped in a transaction; `DROP POLICY IF EXISTS` before `CREATE POLICY` for re-runnability.
+
+**Planner tool payload updated, gear tool shape changed**
+`get_gear_profile` now returns `flies` (with hookSize/imitates/box label) and `tippet` spools instead of `flyBoxes`/`tippetSizes`; description spells out the match axes. `route.ts` and `gear/page.tsx` both fetch the two new tables into `FullGearProfile`.
+
+### Deviations from Spec
+
+- **`src/lib/gear/`** — presets got their own lib directory (like `geo/`, `hatches/`); not in the documented structure.
+- **Enum CHECK constraints relaxed** — 001 enforced `fly category`, `line type`, `leader material` as DB enums; 002 drops them to allow custom values. The preset list is now app-side only.
+
+### Known Gotchas — Granular Gear Model
+
+**`<datalist>` is a suggestion list, not a constraint** — the input accepts any typed value (that's the point). Don't rely on it to validate; the column is free TEXT by design.
+
+**Unchecked checkbox omits its FormData key** — `weighted`/`low_stock` are absent (not `"false"`) when unticked, so the `bool()` helper treats missing as `false`. Correct for add *and* edit (edit re-submits the whole form).
+
+**Blank optional inputs must collapse to `null`** — `str()`/`int()`/`dec()` in `actions.ts` turn `""`/`NaN` into `null` so nullable columns never get empty strings or `NaN`. Required numerics (rod length, weights) still use bare `parseFloat`/`parseInt`.
+
+**Backfill runs once** — re-running `002` re-inserts flies/spools from any still-present arrays; the array columns are dropped at the end of the same transaction, so a second run is a no-op on that front. Safe, but don't re-add the arrays.

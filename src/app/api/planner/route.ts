@@ -68,14 +68,23 @@ export async function POST(request: Request) {
         .single()
       if (!profile) return null
 
-      const [{ data: rods }, { data: reels }, { data: lines }, { data: leaders }, { data: fly_boxes }] =
-        await Promise.all([
-          supabase.from('rods').select('*').eq('gear_profile_id', profile.id),
-          supabase.from('reels').select('*').eq('gear_profile_id', profile.id),
-          supabase.from('lines').select('*').eq('gear_profile_id', profile.id),
-          supabase.from('leaders').select('*').eq('gear_profile_id', profile.id),
-          supabase.from('fly_boxes').select('*').eq('gear_profile_id', profile.id),
-        ])
+      const [
+        { data: rods },
+        { data: reels },
+        { data: lines },
+        { data: leaders },
+        { data: fly_boxes },
+        { data: flies },
+        { data: tippet_spools },
+      ] = await Promise.all([
+        supabase.from('rods').select('*').eq('gear_profile_id', profile.id),
+        supabase.from('reels').select('*').eq('gear_profile_id', profile.id),
+        supabase.from('lines').select('*').eq('gear_profile_id', profile.id),
+        supabase.from('leaders').select('*').eq('gear_profile_id', profile.id),
+        supabase.from('fly_boxes').select('*').eq('gear_profile_id', profile.id),
+        supabase.from('flies').select('*').eq('gear_profile_id', profile.id),
+        supabase.from('tippet_spools').select('*').eq('gear_profile_id', profile.id),
+      ])
 
       return {
         ...profile,
@@ -84,6 +93,8 @@ export async function POST(request: Request) {
         lines: lines ?? [],
         leaders: leaders ?? [],
         fly_boxes: fly_boxes ?? [],
+        flies: flies ?? [],
+        tippet_spools: tippet_spools ?? [],
       }
     },
   }
