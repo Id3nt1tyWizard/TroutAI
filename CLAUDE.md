@@ -342,10 +342,26 @@ Preset vocabularies live in `src/lib/gear/presets.ts` (code-curated, not user-ex
 **Planner tool payload updated, gear tool shape changed**
 `get_gear_profile` now returns `flies` (with hookSize/imitates/box label) and `tippet` spools instead of `flyBoxes`/`tippetSizes`; description spells out the match axes. `route.ts` and `gear/page.tsx` both fetch the two new tables into `FullGearProfile`.
 
+**Scope: full working cutover, not a backend-only add**
+Chosen over an additive/backward-compatible migration. Backend-only would have left an inert `flies` table (the Gear Locker UI is the only write path) or a broken gear page, so the schema, types, actions, planner tool, and frontend were cut over together to keep the app working end-to-end.
+
+**Combobox = native `<input list>` + `<datalist>`**
+One control yields preset suggestions + free-text entry — the "basic now, styled-combobox polish later" take on the preset+custom requirement. No custom component or client library.
+
+**Numeric match keys stay strongly typed**
+`hook_size` and `weight_class` are INTEGER columns, never baked into a text field, so weight-balance and hook÷4≈tippet-X matching still work even when adjacent text fields (category, type) hold custom values.
+
+**`fly_sort` persisted fire-and-forget**
+The flies list holds sort state client-side; `updateFlySort(next).catch(() => {})` persists it via a server action + `revalidatePath`. Sort persistence is non-critical, so a failed write is swallowed and never blocks the UI.
+
+**Matching-rules engine deferred**
+The schema supports concrete match sentences and `get_gear_profile` advertises the axes to the model, but no deterministic match logic (balance / hook÷4≈tippet-X / line-type-vs-depth) was built this session — the model reasons over the richer payload for now.
+
 ### Deviations from Spec
 
 - **`src/lib/gear/`** — presets got their own lib directory (like `geo/`, `hatches/`); not in the documented structure.
 - **Enum CHECK constraints relaxed** — 001 enforced `fly category`, `line type`, `leader material` as DB enums; 002 drops them to allow custom values. The preset list is now app-side only.
+- **`LineType` widened** — added `intermediate` to floating/sink-tip/full-sink (001 omitted it). Now a preset in `presets.ts`, not a DB enum.
 
 ### Known Gotchas — Granular Gear Model
 
@@ -356,3 +372,9 @@ Preset vocabularies live in `src/lib/gear/presets.ts` (code-curated, not user-ex
 **Blank optional inputs must collapse to `null`** — `str()`/`int()`/`dec()` in `actions.ts` turn `""`/`NaN` into `null` so nullable columns never get empty strings or `NaN`. Required numerics (rod length, weights) still use bare `parseFloat`/`parseInt`.
 
 **Backfill runs once** — re-running `002` re-inserts flies/spools from any still-present arrays; the array columns are dropped at the end of the same transaction, so a second run is a no-op on that front. Safe, but don't re-add the arrays.
+
+**Migrations apply by hand — code fails until then** — `002_richer_gear.sql` must be run in the Supabase SQL editor; the gear page and `get_gear_profile` error against the old tables until it is. Easy to forget right after a clean `npm run build` (the build never touches the DB).
+
+**LF→CRLF line-ending noise inflates `git status`** — on this Windows/OneDrive checkout, files show as modified (`M`) vs HEAD from line endings alone, even ones you never edited. Verify a file's hunks with `git diff` before staging — don't trust the `M` flag. Git prints "LF will be replaced by CRLF" on every touch.
+
+**The repo may be committed to concurrently mid-session** — unrelated work (`agent.ts` + `agent.test.ts`) was committed by an external actor as its own commit *during* this session and appeared pre-staged in the index. Stage by explicit path and verify the staged set before committing — never `git add -A` / `git commit -a` blindly here, or you'll sweep in someone else's changes.
