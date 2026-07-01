@@ -7,7 +7,7 @@ Agentic fly-fishing trip planner. Users input dates, region, and species; an AI 
 - **Framework:** Next.js 16 (App Router, TypeScript)
 - **Styling:** Tailwind CSS v4
 - **Database + Auth:** Supabase (PostgreSQL + Supabase Auth via `@supabase/ssr`)
-- **AI:** Anthropic API — `claude-sonnet-4-20250514` with tool use
+- **AI:** Anthropic API (`@anthropic-ai/sdk`) — `claude-opus-4-8` with tool use (the spec's `claude-sonnet-4-20250514` retired 2026-06-15 and now 404s)
 - **Map:** Mapbox GL JS or React Leaflet (Step 5)
 
 ## Development Commands
@@ -65,9 +65,9 @@ Row-level security is enabled on all tables. Users can only read/write their own
 
 ## Build Order
 1. ✅ Project scaffolding (Next.js + Tailwind + Supabase + Auth)
-2. Gear profile UI + database schema
-3. USGS + Weather + Geolocation API integrations with typed wrappers
-4. Agentic planner (Claude tool-use agent orchestrating all data sources + gear profile)
+2. ✅ Gear profile UI + database schema
+3. ✅ USGS + Weather + Geolocation API integrations with typed wrappers
+4. ✅ Agentic planner (Claude tool-use agent orchestrating all data sources + gear profile)
 5. Spot Finder map with live condition overlays + gear match indicators
 6. Community reports (submit + display)
 7. Regulations dashboard
@@ -247,3 +247,73 @@ Fell back to the GitHub REST API using the token from `git credential fill`. Wor
 
 **(Reconfirmed) GitHub branch case sensitivity**
 Verified `default_branch` via the API (`main`, lowercase) before creating the PR with `"base": "main"`.
+
+## Session Decisions Log — Stage 4 (Agentic Planner)
+
+### Architectural Decisions
+
+**Model: `claude-opus-4-8`, not the spec's `claude-sonnet-4-20250514`**
+The spec model retired 2026-06-15 and now 404s. Opus 4.8 is also the better fit for multi-step tool orchestration (geocode → streamflow → weather → gear → regulations → synthesize). Pinned in `src/lib/anthropic/client.ts` as `PLANNER_MODEL`. Adaptive thinking (`thinking: { type: 'adaptive' }`); no `budget_tokens`/`temperature` (removed on 4.8 — they 400).
+
+**Manual tool-use loop, not the SDK tool-runner**
+`streamPlanner` in `src/lib/anthropic/agent.ts` drives the loop by hand so we can (a) emit progress events as each tool fires, (b) cap turns (`MAX_TURNS = 12`) against a non-converging loop, and (c) stream itinerary text as it's produced. The full assistant turn (incl. thinking + tool_use blocks) is pushed back into `messages` each turn — required to continue a tool-use conversation.
+
+**Streaming end-to-end via NDJSON**
+A full trip plan can run long; non-streaming risks an SDK HTTP timeout (`max_tokens: 32000`). The agent yields typed `PlannerEvent`s (`tool` | `text` | `error` | `done`); the route (`src/app/api/planner/route.ts`) serializes them as newline-delimited JSON; the client (`PlannerClient.tsx`) parses NDJSON with a buffered reader. NDJSON over SSE for parse simplicity.
+
+**Tools wrap existing Step 3 wrappers; payloads trimmed**
+`src/lib/anthropic/tools.ts` exposes `geocode_place`, `get_stream_conditions`, `get_weather_forecast`, `get_gear_profile`, plus two stubs. Each returns a compact camelCase summary (not the raw wrapper payload) to keep token cost down — e.g. `get_stream_conditions` drops raw readings and surfaces name/discharge/flow-status/water-temp per gage.
+
+**`check_regulations` + `get_hatch_data` are stubs (decision: stub now)**
+No regulations wrapper exists yet (Step 7) and no hatch source is built. Both return `{ integrated: false, note: ... }`. The system prompt makes the agent surface a prominent manual-verification regulations warning before every itinerary (satisfies the non-negotiable without live data). Replace the stub bodies in Step 7 — the tool names/shapes can stay.
+
+**Gear tool resolves the profile server-side from `auth.uid()`**
+The agent never receives a profile id. The route builds a `ToolContext.getGearProfile` closure over the authed Supabase client; `tools.ts` stays Supabase-free (and unit-testable) by depending only on that closure. Same defense-in-depth as the gear actions.
+
+**Itineraries are display-only (decision: no persistence)**
+Streamed to the page, no DB write — no schema change. A `trips`/`itineraries` table can be added later if persistence is wanted.
+
+**`vitest.config.ts` added for the `@/` alias**
+The planner code imports via `@/lib/...` (idiomatic for the repo). Vitest doesn't read tsconfig `paths`, so a config maps `@` → `./src`. Step 3 tests used only relative imports, so this gap surfaced now.
+
+### Deviations from Spec
+
+- **Model swap** — see above (forced; the spec model is retired).
+- **Regulations/hatch stubbed in Step 4** — real regulations data deferred to Step 7 per build order; hatch has no dedicated step. Planner ships with placeholder tools + a hard-coded verification warning.
+
+### Known Gotchas — Stage 4
+
+**Adaptive thinking blocks must be replayed on tool-use turns**
+Push the entire `final.content` (thinking + tool_use) back into `messages` before sending tool_results. Stripping thinking blocks breaks the next request. `stream.finalMessage()` gives the complete content to append.
+
+**`max_tokens: 0`/non-stream timeout** — streaming is mandatory at `max_tokens: 32000`; a non-streaming call that large risks the SDK's HTTP timeout. Use `client.messages.stream(...)` + `finalMessage()`.
+
+**Tool inputs arrive as parsed objects** — read `tu.input` as a typed object and coerce defensively (`num`/`str` helpers); never raw-string-match the serialized input (4.x models vary JSON escaping).
+
+**`ANTHROPIC_API_KEY` fails late by default** — `getAnthropicClient()` throws a clear, user-facing error if the key is missing rather than letting the SDK fail deep in a request; the agent surfaces it as an `error` event.
+
+### Stage 4 Revisions (post-review hardening)
+
+**Non-negotiables now enforced in code, not just prompted**
+- *Regulations warning:* emitted deterministically as a `notice` event from `agent.ts` on every initial plan (constant `REGULATIONS_WARNING` in `prompt.ts`), rendered as an amber banner — guaranteed present regardless of model output. The system prompt tells the model NOT to write its own long regs section (keeps the itinerary short and avoids duplication).
+- *Streamflow-before-spot:* the loop tracks whether `get_stream_conditions` succeeded; if the initial plan tries to finish (`stop_reason !== 'tool_use'`) without it, the agent injects one corrective user turn forcing the check before allowing `done`. One-shot (`correctionUsed`) to avoid loops.
+
+**Hatch data is now real (curated dataset, not a stub)**
+`src/lib/hatches/` — a typed month-keyed hatch calendar (19 hatches) assembled from published regional charts, with a West/East split at the ~100th meridian (`regionForLongitude`). `getHatches({month, longitude})` filters by month + region. `get_hatch_data` derives the month from the trip date and longitude from geocode, returns `integrated: true`. Swap the dataset for a live feed later without changing the tool. (Only `check_regulations` remains a stub — real regs are Step 7.)
+
+**Planner is multi-turn / conversational**
+`streamPlanner(history, ctx)` takes the full text conversation (`ApiMessage[]`) instead of a one-shot request; the route accepts `{ messages }` and the client resends the whole transcript each turn. Tool blocks are NOT persisted across HTTP requests — only assistant text turns — which keeps the client simple and the history valid (no dangling tool_use). Follow-ups re-call tools as needed. `buildUserPrompt` + `PlannerRequest`/`ApiMessage` moved to `request.ts` (client-safe) so the browser builds the first turn without bundling the system prompt.
+
+**Honest agent-activity log**
+Events are now `tool_start` + `tool_end` (with `ok`), not a single fire-on-invoke `tool`. The UI shows each tool call as running → ✓ (success) / ⚠ (failed, retrying), so it never check-marks a step that actually errored and got redone. (The earlier UI marked ✓ the moment a tool was *called*.)
+
+**Smaller itineraries + grounding**
+System prompt rewritten for brevity (1–2 sentence conditions summary, tight per-day blocks, no prose/repetition) and honesty ("only state what you actually retrieved from a tool this session") — the latter also curbs the model claiming it did steps it didn't.
+
+**Catch reports: intentionally not a tool**
+No `catch_reports` tool (site has no users yet). The 14-day-weighting rule stays as a conditional prompt instruction — applied only if such reports appear in-conversation, never fetched.
+
+### Deviations from Spec (Stage 4 revisions)
+
+- **`src/lib/hatches/`** — hatch data got its own lib directory (like `geo/` in Step 3); the documented structure didn't list one. Curated dataset, not a live API (none exists free).
+- **`vitest.config.ts`** added so tests resolve the `@/` alias.
