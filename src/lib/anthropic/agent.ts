@@ -5,11 +5,14 @@
  * step: emit honest start/end events per tool, cap turns, stream itinerary text,
  * and — critically — ENFORCE two non-negotiables in code rather than trusting the
  * model:
- *   1. Streamflow-before-spot: on the initial plan, if the model tries to finish
- *      without ever calling get_stream_conditions, we inject one correction turn
- *      forcing it to check before finalizing.
- *   2. Regulations warning: emitted as a `notice` event in code on the initial
- *      plan, so it is always surfaced regardless of what the model writes.
+ *   1. Streamflow-before-spot: if the model locates water (geocode) but tries to
+ *      finish without a streamflow check that actually returned data, we inject
+ *      one correction turn forcing the check. This applies to any turn that
+ *      recommends a spot, not just the first — a follow-up like "plan the
+ *      Gallatin instead" is enforced too.
+ *   2. Regulations warning: emitted as a `notice` event in code the moment the
+ *      model starts trip research, so it is always surfaced (and, in the UI,
+ *      persists) before any itinerary — regardless of what the model writes.
  *
  * `streamPlanner` takes the full conversation history (text turns) so the planner
  * is multi-turn — the angler can refine or ask follow-ups.
@@ -35,6 +38,18 @@ export type PlannerEvent =
 /** Hard cap on agent turns — defends against a tool loop that never converges. */
 const MAX_TURNS = 12
 
+/** Tools that indicate the agent is actively planning a spot (vs. a plain Q&A). */
+const TRIP_RESEARCH_TOOLS = new Set([
+  'geocode_place',
+  'get_stream_conditions',
+  'get_weather_forecast',
+  'get_hatch_data',
+])
+
+/** Injected when the model recommends water without a data-bearing flow check. */
+const STREAMFLOW_CORRECTION =
+  'Before you finalize: every water you recommend needs current streamflow from get_stream_conditions. Call it now for the recommended water(s) and reflect the flow status. If no gage reports near a spot, widen the search radius or pick gaged water, and tell the angler its flows are unverified.'
+
 const TOOL_LABELS: Record<string, string> = {
   geocode_place: 'Locating the region',
   get_stream_conditions: 'Checking streamflow',
@@ -45,6 +60,17 @@ const TOOL_LABELS: Record<string, string> = {
 }
 
 const toolLabel = (name: string) => TOOL_LABELS[name] ?? `Running ${name}`
+
+/** True if a get_stream_conditions result actually carries gage data (not empty). */
+function streamflowHasData(content: string): boolean {
+  try {
+    const d = JSON.parse(content) as { gageCount?: unknown; gages?: unknown }
+    if (typeof d.gageCount === 'number') return d.gageCount > 0
+    return Array.isArray(d.gages) && d.gages.length > 0
+  } catch {
+    return false
+  }
+}
 
 export async function* streamPlanner(
   history: ApiMessage[],
@@ -63,10 +89,11 @@ export async function* streamPlanner(
     content: m.content,
   }))
 
-  // The initial plan is the only turn we enforce streamflow + regs on; later
-  // turns are follow-ups that may legitimately not need a fresh check.
-  const isInitialPlan = history.filter((m) => m.role === 'user').length === 1
-  let streamflowChecked = false
+  // Accumulated across this whole call (which may loop several model turns while
+  // tools run). These drive the two in-code guarantees.
+  const calledTools = new Set<string>()
+  let streamflowReturnedData = false
+  let regsNoticeSent = false
   let correctionUsed = false
 
   try {
@@ -100,21 +127,13 @@ export async function* streamPlanner(
       }
 
       if (final.stop_reason !== 'tool_use') {
-        // Enforce streamflow-before-spot: force one correction if the model
-        // produced a plan without ever checking flows.
-        if (isInitialPlan && !streamflowChecked && !correctionUsed) {
+        // Enforce streamflow-before-spot: if the model located water but never
+        // got flow data, force one correction before letting it finish.
+        const locatedWater = calledTools.has('geocode_place')
+        if (locatedWater && !streamflowReturnedData && !correctionUsed) {
           correctionUsed = true
-          messages.push({
-            role: 'user',
-            content:
-              'Before finalizing: you have not called get_stream_conditions for the water(s) you are recommending. Check current streamflow now and revise the plan to reflect the flow status.',
-          })
+          messages.push({ role: 'user', content: STREAMFLOW_CORRECTION })
           continue
-        }
-
-        // Deterministic regulations warning on the initial plan.
-        if (isInitialPlan) {
-          yield { type: 'notice', message: REGULATIONS_WARNING }
         }
         yield { type: 'done' }
         return
@@ -127,8 +146,20 @@ export async function* streamPlanner(
       const results: Anthropic.ToolResultBlockParam[] = []
       for (const tu of toolUses) {
         yield { type: 'tool_start', id: tu.id, name: tu.name, label: toolLabel(tu.name) }
+
+        // Surface the regulations warning as soon as trip research begins, so it
+        // precedes any itinerary. Once per call; the UI keeps it visible.
+        if (TRIP_RESEARCH_TOOLS.has(tu.name) && !regsNoticeSent) {
+          regsNoticeSent = true
+          yield { type: 'notice', message: REGULATIONS_WARNING }
+        }
+
         const { content, isError } = await executeTool(tu.name, tu.input, ctx)
-        if (tu.name === 'get_stream_conditions' && !isError) streamflowChecked = true
+        calledTools.add(tu.name)
+        if (tu.name === 'get_stream_conditions' && !isError && streamflowHasData(content)) {
+          streamflowReturnedData = true
+        }
+
         yield { type: 'tool_end', id: tu.id, name: tu.name, ok: !isError }
         results.push({
           type: 'tool_result',
