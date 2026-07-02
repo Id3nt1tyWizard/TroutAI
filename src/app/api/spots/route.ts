@@ -15,8 +15,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { fetchFullGearProfile } from '@/lib/supabase/gear'
-import { geocodeOne } from '@/lib/geo'
-import { boundingBox } from '@/lib/geo'
+import { boundingBox, geocode } from '@/lib/geo'
 import { getStreamConditions } from '@/lib/usgs'
 import { matchGearToSpot, type GearMatchReport } from '@/lib/gear/matching'
 import { REGULATIONS_WARNING } from '@/lib/anthropic/prompt'
@@ -42,8 +41,22 @@ export interface SpotResult {
   match: GearMatchReport | null
 }
 
+export interface PlaceCandidate {
+  name: string
+  admin1: string | null
+  latitude: number
+  longitude: number
+}
+
 export interface SpotsResponse {
   place: { name: string; admin1: string | null } | null
+  /**
+   * Other geocode matches for the query. Open-Meteo ranks by population, so
+   * the small fishing town the angler meant often is NOT the top result
+   * ("Ennis" → Surprise, AZ) — the client offers these as one-click
+   * corrections that re-search by coordinates.
+   */
+  candidates: PlaceCandidate[]
   center: { latitude: number; longitude: number }
   radiusMiles: number
   hasGearProfile: boolean
@@ -72,6 +85,7 @@ export async function GET(request: Request) {
   let latitude = num(params.get('lat'))
   let longitude = num(params.get('lon'))
   let place: SpotsResponse['place'] = null
+  let candidates: PlaceCandidate[] = []
 
   try {
     if (latitude == null || longitude == null) {
@@ -81,16 +95,23 @@ export async function GET(request: Request) {
           { status: 400 }
         )
       }
-      const result = await geocodeOne(q, { countryCode: 'US' })
-      if (!result) {
+      const results = await geocode(q, { count: 5, countryCode: 'US' })
+      if (results.length === 0) {
         return NextResponse.json(
           { error: `Couldn't find "${q}" — try a nearby town name (e.g. "Ennis" rather than "Madison River, Montana").` },
           { status: 404 }
         )
       }
-      latitude = result.latitude
-      longitude = result.longitude
-      place = { name: result.name, admin1: result.admin1 }
+      const best = results[0]
+      latitude = best.latitude
+      longitude = best.longitude
+      place = { name: best.name, admin1: best.admin1 }
+      candidates = results.map((r) => ({
+        name: r.name,
+        admin1: r.admin1,
+        latitude: r.latitude,
+        longitude: r.longitude,
+      }))
     }
 
     const bbox = boundingBox(latitude, longitude, radiusMiles)
@@ -127,6 +148,7 @@ export async function GET(request: Request) {
 
     const body: SpotsResponse = {
       place,
+      candidates,
       center: { latitude, longitude },
       radiusMiles,
       hasGearProfile: profile != null,

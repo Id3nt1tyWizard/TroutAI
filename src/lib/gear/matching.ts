@@ -35,7 +35,13 @@ export interface SpotConditionsInput {
 }
 
 export type MatchStatus = 'good' | 'partial' | 'mismatch' | 'info'
-export type MatchKind = 'outfit' | 'line-type' | 'flies' | 'tippet' | 'water-temp'
+export type MatchKind =
+  | 'outfit'
+  | 'line-type'
+  | 'flies'
+  | 'tippet'
+  | 'wading'
+  | 'water-temp'
 
 export interface MatchFinding {
   kind: MatchKind
@@ -130,6 +136,8 @@ export function matchGearToSpot(
   const lineType = lineTypeFinding(profile, conditions.flowCategory)
   if (lineType) findings.push(lineType)
   findings.push(...hatchFindings(profile, conditions))
+  const wading = wadingFinding(profile, conditions.waterTempF)
+  if (wading) findings.push(wading)
   const temp = waterTempFinding(conditions.waterTempF)
   if (temp) findings.push(temp)
 
@@ -345,6 +353,36 @@ function hatchFindings(
   }
 
   return out
+}
+
+/**
+ * Wet wading vs. water temperature. Only fires for `wading_setup: 'wet'` with a
+ * known temp — waders work in any water, so they never produce a finding.
+ */
+function wadingFinding(
+  p: FullGearProfile,
+  tempF: number | null
+): MatchFinding | null {
+  if (p.wading_setup !== 'wet' || tempF == null) return null
+  if (tempF < 50) {
+    return {
+      kind: 'wading',
+      status: 'mismatch',
+      summary: `Your profile says wet wading, but the water is ${tempF}°F — that's numbingly cold. You'll want waders on this water.`,
+    }
+  }
+  if (tempF < 60) {
+    return {
+      kind: 'wading',
+      status: 'partial',
+      summary: `Wet wading in ${tempF}°F water will get uncomfortably cold — waders recommended for more than a quick session.`,
+    }
+  }
+  return {
+    kind: 'wading',
+    status: 'good',
+    summary: `Wet wading works here — ${tempF}°F water is comfortable without waders.`,
+  }
 }
 
 /** Trout thermal bands. ≥67°F is a don't-fish-it condition, not a gear issue. */

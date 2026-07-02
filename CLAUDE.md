@@ -120,7 +120,7 @@ Section state enforces mutual exclusivity — only one in-progress form per sect
 
 - **Auth:** Built with Supabase Auth, not NextAuth.js or Clerk
 - **Tailwind config:** Tailwind v4 dropped `tailwind.config.ts` — all theme customization lives in `globals.css` via `@theme` directives. Any reference to `tailwind.config.ts` is wrong.
-- **`/gear` not in middleware matcher:** Middleware only guards `/dashboard`. The gear page does its own `getUser()` + redirect. Revisit if more protected routes accumulate.
+- **`/gear` and `/planner` not in middleware matcher:** Middleware guards `PROTECTED_PREFIXES = ['/dashboard', '/spots']` (list added in Stage 5). The gear and planner pages do their own `getUser()` + redirect instead.
 - **Tippet sizes are hardcoded:** UI checkbox set (0X–7X). Schema accepts arbitrary `text[]` but users can't enter custom designations via the UI.
 - **Fly box patterns use comma-separated input:** Splits on `,`, trims, filters empty. Pattern names containing literal commas are not representable.
 
@@ -445,3 +445,14 @@ Red (much below) → orange → green (normal) → sky → blue (much above); sl
 **Popup renders on a light background** — react-map-gl popups sit on Mapbox's white popup chrome inside a dark-themed app; the shared `SpotDetails` component takes a `compact` flag that swaps to dark-on-light text classes. Don't reuse dark-theme text colors inside popups.
 
 **Vitest picks up any `*.test.ts` under `src/`** — a throwaway live smoke test (real network) was written, run once, and deleted in the same command. If a live test must stick around, name it outside the default include glob or gate it behind an env var — otherwise `npm test` becomes network-dependent.
+
+**A smoke test that doesn't assert on *which* result passed on the wrong data** — the Stage 5 live smoke asserted only "geocode returned something + gages exist," and passed while actually searching Surprise, AZ (Open-Meteo ranks by population, so "Ennis" → Surprise AZ > Ennis TX > Ennis MT). Assert on the resolved place itself, not just non-emptiness.
+
+### Stage 5 Revisions (post-review fixes)
+
+- **Geocode disambiguation** — `/api/spots` now geocodes with `count: 5` and returns all `candidates` alongside the top-hit `place`. The client shows a "Not the right place?" chip row; picking a candidate re-searches by `?lat=&lon=` (the coord path already existed) and patches the place label client-side, preserving the candidate list so the user can keep switching. This closes the "Ennis → Surprise, AZ" failure — the wrong default is now a one-click fix.
+- **Wet-wading finding** — new `wading` match kind in `matching.ts`: fires only for `wading_setup: 'wet'` with a known water temp (<50°F mismatch, 50–59°F partial, ≥60°F good). Waders never produce a finding — they work in any water, and the absence isn't a silent deprioritization.
+- **Gear match on the markers themselves** — marker border color now encodes the match verdict (green/amber/red ring; white when no profile) while the fill stays flow status; legend extended. "Gear match indicators" are now literally on the map, not just in popups.
+- Middleware deviation note corrected (was still claiming only `/dashboard` is guarded).
+
+**Deferred past Stage 5 (reviewed, intentionally not built):** weather overlay on the map (planner's job; no spot-finder non-negotiable requires it), `leaders.tippet_x` in the matcher (marginal next to `tippet_spools`), reading-staleness timestamps, spot-list sorting, dashboard card color, route param-parsing tests.

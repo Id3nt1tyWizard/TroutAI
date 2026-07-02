@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import Map, { Marker, NavigationControl, Popup, type MapRef } from 'react-map-gl/mapbox'
 import 'mapbox-gl/dist/mapbox-gl.css'
-import type { SpotResult, SpotsResponse } from '@/app/api/spots/route'
+import type { PlaceCandidate, SpotResult, SpotsResponse } from '@/app/api/spots/route'
 import type { MatchFinding, MatchStatus } from '@/lib/gear/matching'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN
@@ -50,6 +50,18 @@ function flowColor(spot: SpotResult): string {
   return (spot.flowCategory && FLOW_COLORS[spot.flowCategory]) || NO_STATUS_COLOR
 }
 
+/** Marker ring = gear match verdict (fill stays the flow status). */
+const MATCH_RING_COLORS: Record<'good' | 'partial' | 'mismatch', string> = {
+  good: '#4ade80',
+  partial: '#fbbf24',
+  mismatch: '#f87171',
+}
+const NO_MATCH_RING = 'rgba(255,255,255,0.8)'
+
+function matchRingColor(spot: SpotResult): string {
+  return spot.match ? MATCH_RING_COLORS[spot.match.overall] : NO_MATCH_RING
+}
+
 function zoomForRadius(radiusMiles: number): number {
   return Math.max(6, Math.min(11, Math.round(13 - Math.log2(radiusMiles))))
 }
@@ -74,23 +86,51 @@ export default function SpotsClient() {
     })
   }, [data])
 
-  async function search(e: React.FormEvent) {
-    e.preventDefault()
-    if (loading || !query.trim()) return
+  /** Run a search; `placeOverride` labels coordinate searches (candidate picks). */
+  async function runSearch(
+    params: URLSearchParams,
+    placeOverride?: { name: string; admin1: string | null }
+  ) {
+    if (loading) return
     setLoading(true)
     setError(null)
     setSelectedId(null)
     try {
-      const params = new URLSearchParams({ q: query.trim(), radius: String(radius) })
       const res = await fetch(`/api/spots?${params.toString()}`)
       const body = await res.json()
       if (!res.ok) throw new Error(body?.error ?? `Request failed (${res.status})`)
-      setData(body as SpotsResponse)
+      const response = body as SpotsResponse
+      // Candidate picks search by coordinates, so the response carries no
+      // geocode info — keep the previous candidate list so the user can still
+      // switch between the alternatives.
+      setData((prev) =>
+        placeOverride
+          ? { ...response, place: placeOverride, candidates: prev?.candidates ?? [] }
+          : response
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
       setLoading(false)
     }
+  }
+
+  function search(e: React.FormEvent) {
+    e.preventDefault()
+    if (!query.trim()) return
+    runSearch(new URLSearchParams({ q: query.trim(), radius: String(radius) }))
+  }
+
+  /** Re-search at a specific geocode candidate ("no, I meant Ennis, Montana"). */
+  function searchAt(c: PlaceCandidate) {
+    runSearch(
+      new URLSearchParams({
+        lat: String(c.latitude),
+        lon: String(c.longitude),
+        radius: String(radius),
+      }),
+      { name: c.name, admin1: c.admin1 }
+    )
   }
 
   return (
@@ -143,6 +183,36 @@ export default function SpotsClient() {
         </div>
       )}
 
+      {/* Geocode disambiguation: Open-Meteo ranks by population, so the small
+          fishing town the angler meant is often not the top match. */}
+      {data && data.candidates.length > 1 && (
+        <div className="mb-6 px-4 py-3 rounded-lg bg-slate-800/60 border border-slate-700 text-sm">
+          <span className="text-slate-400 mr-2">
+            Showing{' '}
+            <span className="text-slate-200">
+              {data.place ? `${data.place.name}${data.place.admin1 ? `, ${data.place.admin1}` : ''}` : 'results'}
+            </span>
+            . Not the right place?
+          </span>
+          <span className="inline-flex flex-wrap gap-2 align-middle">
+            {data.candidates
+              .filter((c) => !(c.name === data.place?.name && c.admin1 === data.place?.admin1))
+              .map((c) => (
+                <button
+                  key={`${c.name}|${c.admin1}|${c.latitude}`}
+                  type="button"
+                  disabled={loading}
+                  onClick={() => searchAt(c)}
+                  className="px-2.5 py-0.5 rounded-full border border-slate-600 text-slate-300 hover:text-white hover:border-green-600 text-xs transition-colors disabled:opacity-50"
+                >
+                  {c.name}
+                  {c.admin1 ? `, ${c.admin1}` : ''}
+                </button>
+              ))}
+          </span>
+        </div>
+      )}
+
       {data && (
         <div className="mb-6 px-4 py-3 rounded-lg bg-amber-950/40 border border-amber-800/50 text-amber-200 text-sm flex gap-2">
           <span aria-hidden>⚠</span>
@@ -186,8 +256,11 @@ export default function SpotsClient() {
                   type="button"
                   title={spot.name}
                   aria-label={spot.name}
-                  className="block w-4 h-4 rounded-full border-2 border-white/80 shadow cursor-pointer"
-                  style={{ backgroundColor: flowColor(spot) }}
+                  className="block w-4 h-4 rounded-full border-2 shadow cursor-pointer"
+                  style={{
+                    backgroundColor: flowColor(spot),
+                    borderColor: matchRingColor(spot),
+                  }}
                 />
               </Marker>
             ))}
@@ -228,6 +301,20 @@ export default function SpotsClient() {
               style={{ backgroundColor: NO_STATUS_COLOR }}
             />
             no baseline
+          </span>
+          <span className="basis-full sm:basis-auto sm:border-l sm:border-slate-700 sm:pl-4 flex items-center gap-3">
+            <span className="text-slate-500">marker ring = gear match:</span>
+            {(Object.entries(MATCH_RING_COLORS) as ['good' | 'partial' | 'mismatch', string][]).map(
+              ([verdict, color]) => (
+                <span key={verdict} className="flex items-center gap-1.5">
+                  <span
+                    className="w-2.5 h-2.5 rounded-full inline-block bg-transparent border-2"
+                    style={{ borderColor: color }}
+                  />
+                  {verdict}
+                </span>
+              )
+            )}
           </span>
         </div>
       )}

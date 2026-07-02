@@ -291,6 +291,33 @@ describe('matchGearToSpot — flies and tippet vs. hatches', () => {
   })
 })
 
+describe('matchGearToSpot — wading setup', () => {
+  it('mismatches wet wading in numbing water', () => {
+    const r = matchGearToSpot(profile({ wading_setup: 'wet' }), { ...julyWest, waterTempF: 45 })
+    expect(finding(r, 'wading')?.status).toBe('mismatch')
+  })
+
+  it('warns on wet wading in chilly water', () => {
+    const r = matchGearToSpot(profile({ wading_setup: 'wet' }), { ...julyWest, waterTempF: 55 })
+    expect(finding(r, 'wading')?.status).toBe('partial')
+  })
+
+  it('is good wet wading in comfortable water', () => {
+    const r = matchGearToSpot(profile({ wading_setup: 'wet' }), { ...julyWest, waterTempF: 62 })
+    expect(finding(r, 'wading')?.status).toBe('good')
+  })
+
+  it('emits nothing for waders (they work in any water)', () => {
+    const r = matchGearToSpot(profile({ wading_setup: 'waders' }), { ...julyWest, waterTempF: 45 })
+    expect(finding(r, 'wading')).toBeUndefined()
+  })
+
+  it('emits nothing when the gage does not report temperature', () => {
+    const r = matchGearToSpot(profile({ wading_setup: 'wet' }), { ...julyWest, waterTempF: null })
+    expect(finding(r, 'wading')).toBeUndefined()
+  })
+})
+
 describe('matchGearToSpot — water temperature', () => {
   it('mismatches at 67°F and above', () => {
     const r = matchGearToSpot(profile(), { ...julyWest, waterTempF: 68 })
