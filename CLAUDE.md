@@ -8,7 +8,7 @@ Agentic fly-fishing trip planner. Users input dates, region, and species; an AI 
 - **Styling:** Tailwind CSS v4
 - **Database + Auth:** Supabase (PostgreSQL + Supabase Auth via `@supabase/ssr`)
 - **AI:** Anthropic API (`@anthropic-ai/sdk`) — `claude-opus-4-8` with tool use (the spec's `claude-sonnet-4-20250514` retired 2026-06-15 and now 404s)
-- **Map:** Mapbox GL JS or React Leaflet (Step 5)
+- **Map:** Mapbox GL JS via `react-map-gl` (chosen in Step 5; token in `NEXT_PUBLIC_MAPBOX_TOKEN`)
 
 ## Development Commands
 ```bash
@@ -52,7 +52,7 @@ supabase/
 
 ## Auth Pattern
 - Uses Supabase Auth directly (email + password; OAuth-ready via `/auth/callback`)
-- Middleware (`middleware.ts`) refreshes the session on every request and guards `/dashboard/*`
+- Middleware (`middleware.ts`) refreshes the session on every request and guards the `PROTECTED_PREFIXES` routes (`/dashboard`, `/spots`)
 - Server components use `src/lib/supabase/server.ts`; client components use `src/lib/supabase/client.ts`
 - Never call `getSession()` on the server — always use `getUser()` (authoritative)
 
@@ -70,7 +70,7 @@ Migration `002` moved to a granular gear model: `flies` are first-class rows (fl
 2. ✅ Gear profile UI + database schema
 3. ✅ USGS + Weather + Geolocation API integrations with typed wrappers
 4. ✅ Agentic planner (Claude tool-use agent orchestrating all data sources + gear profile)
-5. Spot Finder map with live condition overlays + gear match indicators
+5. ✅ Spot Finder map with live condition overlays + gear match indicators
 6. Community reports (submit + display)
 7. Regulations dashboard
 
@@ -393,3 +393,55 @@ The schema supports concrete match sentences and `get_gear_profile` advertises t
 **LF→CRLF line-ending noise inflates `git status`** — on this Windows/OneDrive checkout, files show as modified (`M`) vs HEAD from line endings alone, even ones you never edited. Verify a file's hunks with `git diff` before staging — don't trust the `M` flag. Git prints "LF will be replaced by CRLF" on every touch.
 
 **The repo may be committed to concurrently mid-session** — unrelated work (`agent.ts` + `agent.test.ts`) was committed by an external actor as its own commit *during* this session and appeared pre-staged in the index. Stage by explicit path and verify the staged set before committing — never `git add -A` / `git commit -a` blindly here, or you'll sweep in someone else's changes.
+
+## Session Decisions Log — Stage 5 (Spot Finder Map)
+
+### Architectural Decisions
+
+**Mapbox GL JS via `react-map-gl` v8, not React Leaflet**
+The env var was already scaffolded for Mapbox and it handles marker interaction natively. v8 imports from the **subpath** `react-map-gl/mapbox` (not the package root), plus `mapbox-gl/dist/mapbox-gl.css`. Token read from `NEXT_PUBLIC_MAPBOX_TOKEN`; when it's missing the map pane degrades to an instructional placeholder and the spot list below still works — no token required to use the feature.
+
+**A "spot" is a live USGS gage — no new spots table**
+`/api/spots` runs geocode → `boundingBox(radius)` → `getStreamConditions(bbox)`; each gage that currently reports data becomes a map marker. `getStreamConditions` already drops gages with no live readings, so "never recommend a spot without checking streamflow" holds *by construction* — an unchecked spot cannot appear. No schema change this stage.
+
+**Deterministic gear matching in `src/lib/gear/matching.ts` (finishes what Stage 4 deferred)**
+Pure, no-I/O module: `matchGearToSpot(profile, conditions) → GearMatchReport`. Five axes, each an explicit `MatchFinding` with a plain-language summary (the non-negotiable: mismatches are stated, never silently deprioritized):
+- *outfit* — rod `weight_class` vs. line weight vs. reel `line_weight`, ±1 tolerance
+- *line-type* — floating vs. sinking against the gage's flow category (high water + floating-only + no weighted flies = explicit mismatch)
+- *flies* — user flies vs. the month's active hatches (`imitates` taxon via a hatch-name→taxa map, pattern-name fallback against the hatch's suggested patterns, hook size must fall in the hatch's size range)
+- *tippet* — hook-size ÷ 4 ≈ tippet-X (±1X) against hatch size ranges; flags `low_stock` spools the month depends on
+- *water-temp* — trout thermal bands; ≥67°F is a mismatch ("don't fish it"), <40°F a caution
+`overall` is worst-of (mismatch > partial > good); `info` findings never drag the score. 31 unit tests, no network.
+
+**Gear matching runs server-side in the route**
+The API returns finished `GearMatchReport`s; the client only renders them. Profile resolved via `auth.uid()` (same defense-in-depth as everywhere else). Client imports only *types* from the route/matching modules.
+
+**`fetchFullGearProfile` extracted to `src/lib/supabase/gear.ts`**
+The profile+7-sub-tables join was already duplicated in `gear/page.tsx` and the planner route; the spots route would have been a third copy. All three call sites now share the helper (takes an authed client + userId, returns `FullGearProfile | null`).
+
+**Middleware guards are now a list**
+`middleware.ts` uses `PROTECTED_PREFIXES = ['/dashboard', '/spots']` per the "revisit if more protected routes accumulate" note. `/gear` and `/planner` still do their own page-level `getUser()` checks (unchanged this stage).
+
+**Regulations warning reused, not duplicated**
+The route includes `REGULATIONS_WARNING` (imported from `prompt.ts`, server-side only) in its JSON response; the client renders the same amber banner as the planner whenever results are shown. Still a manual-verification notice until Step 7.
+
+**Flow-status marker colors follow the USGS WaterWatch convention**
+Red (much below) → orange → green (normal) → sky → blue (much above); slate for gages with no percentile baseline. Same classification the planner uses (`classifyFlow`).
+
+### Deviations from Spec
+
+- **No persistence for spot searches** — results are display-only, like Stage 4 itineraries.
+- **Match month is "now"** — the Spot Finder shows *live* conditions, so hatch/tippet matching uses the current month, not a trip date (trip-date matching stays the planner's job).
+- **Geocoding restricted to `countryCode: 'US'`** — USGS gages are US-only; this also reduces the known Open-Meteo ambiguity problem. The resolved place name is echoed back in the UI so a mis-resolve is visible.
+
+### Known Gotchas — Stage 5
+
+**`react-map-gl` v8 import path** — `import Map from 'react-map-gl'` no longer works; v8 splits by engine: `react-map-gl/mapbox` (or `/maplibre`). Types like `MapRef` come from the same subpath.
+
+**Importing from a route file into a client component** — `SpotsClient` needs the response types from `app/api/spots/route.ts`. `import type { ... }` is erased at compile time so nothing server-side leaks into the bundle — but a *value* import there would break (and would drag `prompt.ts` etc. into the client). Keep such imports type-only; the same rule that kept `request.ts` client-safe in Stage 4.
+
+**Marker click must stop propagation** — `Marker.onClick` receives the mapbox event; without `e.originalEvent.stopPropagation()` the map's own click handler immediately closes the popup you just opened.
+
+**Popup renders on a light background** — react-map-gl popups sit on Mapbox's white popup chrome inside a dark-themed app; the shared `SpotDetails` component takes a `compact` flag that swaps to dark-on-light text classes. Don't reuse dark-theme text colors inside popups.
+
+**Vitest picks up any `*.test.ts` under `src/`** — a throwaway live smoke test (real network) was written, run once, and deleted in the same command. If a live test must stick around, name it outside the default include glob or gate it behind an env var — otherwise `npm test` becomes network-dependent.

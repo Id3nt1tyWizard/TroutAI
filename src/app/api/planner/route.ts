@@ -12,9 +12,9 @@
 
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { fetchFullGearProfile } from '@/lib/supabase/gear'
 import { streamPlanner, type ToolContext } from '@/lib/anthropic/agent'
 import type { ApiMessage } from '@/lib/anthropic/request'
-import type { FullGearProfile } from '@/types/database'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -60,43 +60,7 @@ export async function POST(request: Request) {
 
   // Gear lookup is scoped to the authed user — the agent never receives an id.
   const ctx: ToolContext = {
-    getGearProfile: async (): Promise<FullGearProfile | null> => {
-      const { data: profile } = await supabase
-        .from('gear_profiles')
-        .select('*')
-        .eq('user_id', user.id)
-        .single()
-      if (!profile) return null
-
-      const [
-        { data: rods },
-        { data: reels },
-        { data: lines },
-        { data: leaders },
-        { data: fly_boxes },
-        { data: flies },
-        { data: tippet_spools },
-      ] = await Promise.all([
-        supabase.from('rods').select('*').eq('gear_profile_id', profile.id),
-        supabase.from('reels').select('*').eq('gear_profile_id', profile.id),
-        supabase.from('lines').select('*').eq('gear_profile_id', profile.id),
-        supabase.from('leaders').select('*').eq('gear_profile_id', profile.id),
-        supabase.from('fly_boxes').select('*').eq('gear_profile_id', profile.id),
-        supabase.from('flies').select('*').eq('gear_profile_id', profile.id),
-        supabase.from('tippet_spools').select('*').eq('gear_profile_id', profile.id),
-      ])
-
-      return {
-        ...profile,
-        rods: rods ?? [],
-        reels: reels ?? [],
-        lines: lines ?? [],
-        leaders: leaders ?? [],
-        fly_boxes: fly_boxes ?? [],
-        flies: flies ?? [],
-        tippet_spools: tippet_spools ?? [],
-      }
-    },
+    getGearProfile: () => fetchFullGearProfile(supabase, user.id),
   }
 
   const encoder = new TextEncoder()
