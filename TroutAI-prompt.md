@@ -19,7 +19,7 @@ You are building **Trout AI**, a web application designed for serious and compet
   - Queries USGS streamflow data to evaluate river/stream conditions
   - Fetches weather and water temperature forecasts for candidate spots
   - Checks public fishing regulations by state (seasons, bag limits, catch-and-release rules, licensing)
-  - Synthesizes user-submitted community reports for recent catch activity
+  - Best-effort, non-blocking live search for nearby fly shop/guide reports, surfaced as unverified informational links (never parsed into ranking)
   - Factors in the user's current GPS position (or manually entered location) to prioritize nearby spots and calculate drive times
   - Factors in the user's gear profile to tailor all recommendations
   - Produces a ranked, day-by-day itinerary with best spots, recommended times, hatch conditions, and gear guidance
@@ -48,12 +48,25 @@ Users set up a persistent gear profile on their account:
 
 ### 4. Spot Finder Map
 - Interactive map view of candidate fishing locations
-- Each pin shows: current streamflow status, water temp, regulation summary, community report score, and gear match indicator (green/yellow/red based on user's profile)
+- Each pin shows: current streamflow status, water temp, regulation summary, gear match indicator (green/yellow/red based on user's profile), and (where found) live-searched nearby shop/guide report links + a nearby fly shop directory entry
 - Filter by species, access type (walk-in, wade, boat), and difficulty
 
-### 5. Community Reports
-- Authenticated users can submit catch reports: species, method, fly pattern used, water conditions, and optional gear notes
-- Reports feed back into the AI ranking model for future recommendations
+### 5. Local Shop/Guide Info (Live Lookup + Nearby Shops)
+Two independent, ephemeral (non-persisted) pieces — no user-submitted catch reports, no curated/parsed source list:
+
+**5a. Report Links (live web search)**
+- A live, best-effort search for fly shop/guide content near the location the user is already searching (reusing the same geocoded region + drive-radius the planner and Spot Finder already compute for streamflow), returning a small set of links
+- Purely informational — a link, source name, date (if available), and snippet. Never parsed into structured fields, never fed into gear-matching or itinerary ranking
+- Always labeled as unverified: dated results older than 14 days (or undated results) get an explicit "may be stale — verify before relying on it" flag rather than being scored or weighted
+- Non-blocking by design: bounded timeout, one attempt per planning/search session, degrades silently (no result shown) if the search fails or times out — never blocks or fails the itinerary or spot search
+- Guardrails: query is geographically constrained (same bounding box as streamflow lookups) to avoid out-of-range results; only bounded fields (title/url/date/snippet) are passed through, never a full page fetch, to limit prompt-injection surface; returned content is treated as untrusted display data only, never as instructions; a small denylist filters known spam/content-farm domains
+- Always attributed clearly ("According to *[Shop/Guide Name]*, posted *[date]* → link") — never presented as the app's own claim
+
+**5b. Nearby Fly Shops (map/POI query)**
+- A simple map-based point-of-interest query (reusing the existing Mapbox integration/token from the Spot Finder) for physical fly shops near the searched location — for buying gear or booking a guide in person, not fishing conditions/intel
+- Returns a plain list: shop name, address, distance, and phone/website if available from the POI data
+- Structured location data from a maps API, not scraped content — no staleness disclaimer needed (an address doesn't go stale the way a blog post does), no prompt-injection concerns
+- Non-blocking/best-effort like everything else in this section; shown wherever it fits alongside the report links — no dedicated UI required
 
 ### 6. Regulations Dashboard
 - Per-state regulation summaries pulled from public sources
@@ -68,7 +81,9 @@ Users set up a persistent gear profile on their account:
 | USGS Water Services API | Real-time streamflow & gauge height |
 | Open-Meteo or Weather.gov | Weather + water temp forecasts |
 | Hatch data (Hatch Matcher API or static seasonal tables) | Fly pattern recommendations |
-| User submissions (Postgres) | Community catch reports + gear profiles |
+| Gear profiles (Postgres) | User gear locker data |
+| Live web search (fly shop/guide content near searched region) | Unverified informational links only — not parsed, not ranked |
+| Mapbox POI/category search (reusing existing Mapbox token) | Nearby fly shop directory (name, address, distance) for gear/guide access |
 | State regulation data | Season dates, rules (scrape or static JSON per state) |
 | Browser Geolocation API | User's current position for proximity sorting |
 
@@ -77,8 +92,8 @@ Users set up a persistent gear profile on their account:
 ## Architecture Guidelines
 
 - Use **Next.js App Router** with server components for data fetching where possible
-- Use **server actions** for form submissions (catch reports, trip requests, gear profile saves)
-- Store user data, gear profiles, and community reports in **PostgreSQL** (Supabase recommended)
+- Use **server actions** for form submissions (trip requests, gear profile saves)
+- Store user data and gear profiles in **PostgreSQL** (Supabase recommended). Local shop/guide report links and the nearby fly shop directory are both live and ephemeral — not persisted, same display-only convention as planner itineraries and Spot Finder results
 - Use the **Anthropic API** (`claude-sonnet-4-20250514`) for the agentic planner — give it tool use access to each data source, including a `get_gear_profile` tool and a `get_user_location` tool so it can personalize autonomously
 - Map: use **Mapbox GL JS** or **React Leaflet**
 - Auth: **NextAuth.js** or **Clerk**
@@ -133,7 +148,7 @@ The planner agent must follow this reasoning chain on every trip request:
 3. USGS + Weather + Geolocation API integrations with typed wrappers
 4. Agentic planner (Claude tool-use agent orchestrating all data sources + gear profile)
 5. Spot Finder map with live condition overlays + gear match indicators
-6. Community reports (submit + display)
+6. Local shop/guide info: live report-link search + nearby fly shop directory (map/POI query) — no user submissions, no curated source list
 7. Regulations dashboard
 
 ---
@@ -143,6 +158,6 @@ The planner agent must follow this reasoning chain on every trip request:
 - Always surface regulation warnings before confirming any itinerary
 - Never recommend a spot without checking current streamflow status
 - Always explain gear mismatches explicitly — do not silently deprioritize spots
-- Community reports older than 14 days should be weighted lower in rankings
+- Local shop/guide links older than 14 days (or undated) must be flagged as unverified/stale, never scored or weighted into rankings
 - Gear profile overrides per trip must never mutate the saved profile
 - Keep all API keys in `.env.local`, never hardcoded

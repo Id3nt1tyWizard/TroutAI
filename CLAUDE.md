@@ -35,7 +35,7 @@ src/
     gear/               # Gear profile UI (Step 2)
     planner/            # Agentic planner UI (Step 4)
     spots/              # Spot finder map (Step 5)
-    reports/            # Community reports (Step 6)
+    reports/            # Local shop/guide link lookup (live search, Step 6)
     regulations/        # Regulations dashboard (Step 7)
   lib/
     supabase/
@@ -63,6 +63,8 @@ Tables: `gear_profiles`, `rods`, `reels`, `lines`, `leaders`, `fly_boxes`, `flie
 
 Row-level security is enabled on all tables. Users can only read/write their own gear data. Catch reports are publicly readable.
 
+`catch_reports` is dormant as of the Stage 6 scope change below — Stage 6 is now a live shop/guide link lookup, not user submissions, and needs no new table at all (results are ephemeral, like planner itineraries and Spot Finder results). The table stays in the schema unused for now; plan to drop it in a future migration once it's confirmed nothing depends on it.
+
 Migration `002` moved to a granular gear model: `flies` are first-class rows (flat by default, optional `box_id` grouping), `tippet_spools` replaces the old `gear_profiles.tippet_sizes` array, and `fly_boxes` became optional labeled containers. Preset vocabularies live in `src/lib/gear/presets.ts` (globally fixed) — the affected columns are plain TEXT (enum CHECKs relaxed) so users can also type custom values.
 
 ## Build Order
@@ -71,17 +73,37 @@ Migration `002` moved to a granular gear model: `flies` are first-class rows (fl
 3. ✅ USGS + Weather + Geolocation API integrations with typed wrappers
 4. ✅ Agentic planner (Claude tool-use agent orchestrating all data sources + gear profile)
 5. ✅ Spot Finder map with live condition overlays + gear match indicators
-6. Community reports (submit + display)
+6. Local shop/guide info: live report-link search + nearby fly shop directory (map/POI query) — no user submissions, no curated source list, no new table
 7. Regulations dashboard
 
 ## Non-Negotiables (from spec)
 - Always surface regulation warnings before confirming any itinerary
 - Never recommend a spot without checking current streamflow status
 - Always explain gear mismatches explicitly — never silently deprioritize
-- Community reports older than 14 days weighted lower in rankings
+- Local shop/guide links older than 14 days (or undated) flagged as unverified/stale, never scored or weighted into rankings
 - Trip gear overrides must never mutate the saved profile
 - All API keys in `.env.local`, never hardcoded
 
+## Stage 6 Design Notes (planned 2026-07-04, not yet built)
+
+Stage 6 was rescoped from "user-submitted community reports" to two independent, ephemeral pieces. Design decided this session, to apply when Stage 6 is actually implemented:
+
+### 6a. Report Links (live web search)
+- **No new table, no persistence.** Results are ephemeral like planner itineraries and Spot Finder results. `catch_reports` stays dormant (see Database section) — do not repurpose it.
+- **Reuse the existing geocode/bounding-box**, not a new geocoding call — the planner and Spot Finder already resolve the region and drive-radius for streamflow; the shop/guide search should be scoped to that same bounding box to avoid out-of-range results.
+- **Non-blocking, best-effort, one-shot per session** — bounded timeout via the shared `src/lib/http.ts` pattern (AbortController + retry), skip silently on failure/timeout, never block or fail the itinerary/spot search. Fire once per planning/search session, not on every follow-up turn (mirror the `correctionUsed` one-shot pattern in `agent.ts`).
+- **Only bounded fields pass through**: title, URL, source name, date (if available), snippet. Never a full-page fetch — keeps the prompt-injection surface small. Returned content is untrusted display data only, never instructions to follow (same discipline as any other tool result).
+- **Staleness is disclosed, not filtered**: results older than 14 days, or with no date at all, get an explicit "may be stale — verify before relying on it" label. This is the non-negotiable's mechanism — there's no ranking to weight, so the 14-day rule manifests as a disclosure flag instead.
+- **Quality guardrails**: a small, reactively-grown denylist for known spam/content-farm domains, plus a light relevance heuristic (prefer results whose title/snippet names the searched river/region).
+- **Always attributed**: "According to *[Shop/Guide Name]*, posted *[date]* → link" — never rendered as the app's own claim.
+- **Explicitly out of scope**: no curated per-region source list, no feed/RSS parsing, no structured fields feeding gear-matching or itinerary ranking. (Fly Fish Food's Atom feed, discovered and verified earlier this session, is not being built into a curated backbone — this decision supersedes that direction.)
+
+### 6b. Nearby Fly Shops (map/POI query) — added 2026-07-04
+- Separate feature from 6a: a physical shop directory for buying gear or booking a guide in person, not fishing-conditions content.
+- Reuses the **existing Mapbox integration** (`NEXT_PUBLIC_MAPBOX_TOKEN`, already used by the Spot Finder map) — query Mapbox's POI/category search for fly shops near the resolved location. No new API key or provider.
+- Returns a plain list: shop name, address, distance, phone/website if present in the POI data. No new table, no persistence — ephemeral like everything else in Stage 6.
+- Simpler than 6a by nature: structured POI metadata from a maps API, not scraped web content, so there's no prompt-injection surface and no staleness disclaimer to design (an address doesn't go stale like a blog post does).
+- Same non-blocking/best-effort convention — a failed or empty POI query just shows nothing, never blocks the rest of the output.
 
 ## Session Decisions Log
 
