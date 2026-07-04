@@ -30,8 +30,9 @@ export async function middleware(request: NextRequest) {
 
   const pathname = request.nextUrl.pathname
   const isAuthPage = pathname === '/login' || pathname === '/signup'
+  const PROTECTED_PREFIXES = ['/dashboard', '/spots']
 
-  if (!user && pathname.startsWith('/dashboard')) {
+  if (!user && PROTECTED_PREFIXES.some((p) => pathname.startsWith(p))) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
