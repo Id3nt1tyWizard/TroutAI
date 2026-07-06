@@ -3,6 +3,8 @@
 import { useRef, useState } from 'react'
 import Link from 'next/link'
 import { buildUserPrompt, type ApiMessage } from '@/lib/anthropic/request'
+import LocalInfoPanel from '@/components/LocalInfoPanel'
+import type { FlyShop, ReportLink } from '@/lib/local-info'
 
 const cx = {
   input:
@@ -18,6 +20,7 @@ type PlannerEvent =
   | { type: 'tool_end'; id: string; name: string; ok: boolean }
   | { type: 'text'; text: string }
   | { type: 'notice'; message: string }
+  | { type: 'local_info'; links: ReportLink[] | null; shops: FlyShop[] | null }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -46,6 +49,12 @@ export default function PlannerClient() {
   const [streamingText, setStreamingText] = useState('')
   const [activity, setActivity] = useState<ActivityItem[]>([])
   const [notices, setNotices] = useState<string[]>([])
+  // Stage 6 local info — persists across turns like notices; a later run that
+  // re-locates water simply replaces it.
+  const [localInfo, setLocalInfo] = useState<{
+    links: ReportLink[] | null
+    shops: FlyShop[] | null
+  } | null>(null)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -79,6 +88,9 @@ export default function PlannerClient() {
           break
         case 'notice':
           setNotices((n) => (n.includes(event.message) ? n : [...n, event.message]))
+          break
+        case 'local_info':
+          setLocalInfo({ links: event.links, shops: event.shops })
           break
         case 'error':
           setError(event.message)
@@ -249,6 +261,14 @@ export default function PlannerClient() {
               </li>
             )}
           </ul>
+        </div>
+      )}
+
+      {/* Stage 6 local info — best-effort extras from the run's geocoded
+          region; absence just means nothing came back in time. */}
+      {localInfo && (
+        <div className="mt-6">
+          <LocalInfoPanel links={localInfo.links} shops={localInfo.shops} />
         </div>
       )}
 

@@ -18,6 +18,7 @@ import { fetchFullGearProfile } from '@/lib/supabase/gear'
 import { boundingBox, geocode } from '@/lib/geo'
 import { getStreamConditions } from '@/lib/usgs'
 import { matchGearToSpot, type GearMatchReport } from '@/lib/gear/matching'
+import { getLocalInfo, type FlyShop, type ReportLink } from '@/lib/local-info'
 import { REGULATIONS_WARNING } from '@/lib/anthropic/prompt'
 
 export const runtime = 'nodejs'
@@ -62,6 +63,13 @@ export interface SpotsResponse {
   hasGearProfile: boolean
   regulationsWarning: string
   spots: SpotResult[]
+  /**
+   * Stage 6 local info, best-effort: null = lookup unavailable/failed (show
+   * nothing), [] = ran and found nothing. Unverified display data only — never
+   * fed into gear matching or spot ordering.
+   */
+  reportLinks: ReportLink[] | null
+  flyShops: FlyShop[] | null
 }
 
 function num(v: string | null): number | null {
@@ -86,6 +94,10 @@ export async function GET(request: Request) {
   let longitude = num(params.get('lon'))
   let place: SpotsResponse['place'] = null
   let candidates: PlaceCandidate[] = []
+  // Coordinate searches (candidate picks) carry the chosen place name along so
+  // the report-link search can still scope by name without re-geocoding.
+  let localPlace = params.get('place')?.trim() || null
+  let localAdmin1 = params.get('admin1')?.trim() || null
 
   try {
     if (latitude == null || longitude == null) {
@@ -106,6 +118,8 @@ export async function GET(request: Request) {
       latitude = best.latitude
       longitude = best.longitude
       place = { name: best.name, admin1: best.admin1 }
+      localPlace = best.name
+      localAdmin1 = best.admin1
       candidates = results.map((r) => ({
         name: r.name,
         admin1: r.admin1,
@@ -115,9 +129,18 @@ export async function GET(request: Request) {
     }
 
     const bbox = boundingBox(latitude, longitude, radiusMiles)
-    const [conditions, profile] = await Promise.all([
+    // getLocalInfo is best-effort and never throws — a dead search engine or
+    // POI endpoint degrades to nulls without failing the spot search.
+    const [conditions, profile, localInfo] = await Promise.all([
       getStreamConditions(bbox),
       fetchFullGearProfile(supabase, user.id),
+      getLocalInfo({
+        latitude,
+        longitude,
+        radiusMiles,
+        place: localPlace,
+        admin1: localAdmin1,
+      }),
     ])
 
     const month = new Date().getMonth() + 1
@@ -154,6 +177,8 @@ export async function GET(request: Request) {
       hasGearProfile: profile != null,
       regulationsWarning: REGULATIONS_WARNING,
       spots,
+      reportLinks: localInfo.links,
+      flyShops: localInfo.shops,
     }
     return NextResponse.json(body)
   } catch (e) {

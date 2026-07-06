@@ -14,6 +14,7 @@ import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { fetchFullGearProfile } from '@/lib/supabase/gear'
 import { streamPlanner, type ToolContext } from '@/lib/anthropic/agent'
+import { getLocalInfo } from '@/lib/local-info'
 import type { ApiMessage } from '@/lib/anthropic/request'
 
 export const runtime = 'nodejs'
@@ -59,8 +60,11 @@ export async function POST(request: Request) {
   }
 
   // Gear lookup is scoped to the authed user — the agent never receives an id.
+  // getLocalInfo is the Stage 6 side-channel (report links + fly shops) the
+  // agent fires once per run after geocoding; best-effort, UI-only.
   const ctx: ToolContext = {
     getGearProfile: () => fetchFullGearProfile(supabase, user.id),
+    getLocalInfo,
   }
 
   const encoder = new TextEncoder()

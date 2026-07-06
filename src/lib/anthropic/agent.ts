@@ -23,6 +23,7 @@ import { getAnthropicClient, PLANNER_MODEL } from './client'
 import { SYSTEM_PROMPT, REGULATIONS_WARNING } from './prompt'
 import { plannerTools, executeTool, type ToolContext } from './tools'
 import type { ApiMessage } from './request'
+import type { FlyShop, LocalInfo, ReportLink } from '@/lib/local-info'
 
 export type { ApiMessage, PlannerRequest } from './request'
 export type { ToolContext } from './tools'
@@ -32,6 +33,8 @@ export type PlannerEvent =
   | { type: 'tool_end'; id: string; name: string; ok: boolean }
   | { type: 'text'; text: string }
   | { type: 'notice'; message: string }
+  /** Stage 6 local info — untrusted display data for the UI, never model input. */
+  | { type: 'local_info'; links: ReportLink[] | null; shops: FlyShop[] | null }
   | { type: 'error'; message: string }
   | { type: 'done' }
 
@@ -72,6 +75,36 @@ function streamflowHasData(content: string): boolean {
   }
 }
 
+/** Same radius get_stream_conditions defaults to — local info shares the region. */
+const LOCAL_INFO_RADIUS_MILES = 25
+
+/**
+ * Residual wait for the local-info lookup at finish time. It was kicked off
+ * back when the region geocoded (and its HTTP calls are bounded anyway), so
+ * this only bites when the model finished unusually fast — and even then the
+ * itinerary is already fully streamed. Best-effort: not done in time ⇒ skip.
+ */
+const LOCAL_INFO_GRACE_MS = 4_000
+
+/** Top geocode hit out of a geocode_place tool result, or null. */
+function firstGeocodeHit(
+  content: string
+): { place: string | null; admin1: string | null; latitude: number; longitude: number } | null {
+  try {
+    const d = JSON.parse(content) as { results?: Array<Record<string, unknown>> }
+    const r = d.results?.[0]
+    if (!r || typeof r.latitude !== 'number' || typeof r.longitude !== 'number') return null
+    return {
+      place: typeof r.name === 'string' ? r.name : null,
+      admin1: typeof r.admin1 === 'string' ? r.admin1 : null,
+      latitude: r.latitude,
+      longitude: r.longitude,
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function* streamPlanner(
   history: ApiMessage[],
   ctx: ToolContext
@@ -95,6 +128,10 @@ export async function* streamPlanner(
   let streamflowReturnedData = false
   let regsNoticeSent = false
   let correctionUsed = false
+  // Stage 6 one-shot (the correctionUsed pattern): fired on the first
+  // successful geocode of this run, never again — follow-up turns that don't
+  // re-locate water don't re-search.
+  let localInfoPromise: Promise<LocalInfo | null> | null = null
 
   try {
     for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -135,6 +172,22 @@ export async function* streamPlanner(
           messages.push({ role: 'user', content: STREAMFLOW_CORRECTION })
           continue
         }
+        // Stage 6: surface any local info that came back while the model
+        // worked. Bounded residual wait, skipped silently when empty or slow —
+        // this must never delay-fail or block the itinerary.
+        if (localInfoPromise) {
+          let graceTimer: ReturnType<typeof setTimeout> | undefined
+          const info = await Promise.race([
+            localInfoPromise,
+            new Promise<null>((resolve) => {
+              graceTimer = setTimeout(() => resolve(null), LOCAL_INFO_GRACE_MS)
+            }),
+          ])
+          clearTimeout(graceTimer)
+          if (info && ((info.links?.length ?? 0) > 0 || (info.shops?.length ?? 0) > 0)) {
+            yield { type: 'local_info', links: info.links, shops: info.shops }
+          }
+        }
         yield { type: 'done' }
         return
       }
@@ -158,6 +211,24 @@ export async function* streamPlanner(
         calledTools.add(tu.name)
         if (tu.name === 'get_stream_conditions' && !isError && streamflowHasData(content)) {
           streamflowReturnedData = true
+        }
+
+        // Stage 6 side-channel: the region is now resolved, so kick off the
+        // local shop/guide lookup in the background. Results go straight to
+        // the UI at finish time — never into the model's context.
+        if (tu.name === 'geocode_place' && !isError && !localInfoPromise && ctx.getLocalInfo) {
+          const hit = firstGeocodeHit(content)
+          if (hit) {
+            localInfoPromise = ctx
+              .getLocalInfo({
+                latitude: hit.latitude,
+                longitude: hit.longitude,
+                radiusMiles: LOCAL_INFO_RADIUS_MILES,
+                place: hit.place,
+                admin1: hit.admin1,
+              })
+              .catch(() => null)
+          }
         }
 
         yield { type: 'tool_end', id: tu.id, name: tu.name, ok: !isError }
