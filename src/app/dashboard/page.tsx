@@ -33,6 +33,7 @@ export default async function DashboardPage() {
           { label: 'Plan a trip', href: '/planner', desc: 'Build a day-by-day itinerary', color: 'green' },
           { label: 'Gear locker', href: '/gear', desc: 'Manage your rod, reel, and fly box', color: 'sky' },
           { label: 'Spot finder', href: '/spots', desc: 'Browse live conditions on the map', color: 'slate' },
+          { label: 'Shops & reports', href: '/reports', desc: 'Nearby fly shops + local shop/guide reports', color: 'slate' },
         ].map((card) => (
           <a
             key={card.href}

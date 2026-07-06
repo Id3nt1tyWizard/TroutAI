@@ -22,7 +22,8 @@ Copy `.env.local.example` → `.env.local` and fill in:
 - `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` — from Supabase project settings
 - `SUPABASE_SERVICE_ROLE_KEY` — server-only, never expose to client
 - `ANTHROPIC_API_KEY` — for the agentic planner
-- `NEXT_PUBLIC_MAPBOX_TOKEN` — for the spot finder map
+- `NEXT_PUBLIC_MAPBOX_TOKEN` — for the spot finder map + Stage 6 fly-shop POI search
+- `BRAVE_SEARCH_API_KEY` — optional; Stage 6 report-link search (degrades silently to "no links" when missing)
 
 ## Project Structure
 ```
@@ -37,6 +38,8 @@ src/
     spots/              # Spot finder map (Step 5)
     reports/            # Local shop/guide link lookup (live search, Step 6)
     regulations/        # Regulations dashboard (Step 7)
+  components/
+    LocalInfoPanel.tsx  # Shared Stage 6 renderer (report links + fly shops)
   lib/
     supabase/
       client.ts         # Browser Supabase client (createBrowserClient)
@@ -44,6 +47,9 @@ src/
     anthropic/          # Claude API client + tool definitions (Step 4)
     usgs/               # USGS streamflow API wrapper (Step 3)
     weather/            # Open-Meteo API wrapper (Step 3)
+    reports/            # Brave Search report-link wrapper (Step 6a)
+    shops/              # Mapbox POI fly-shop wrapper (Step 6b)
+    local-info.ts       # Stage 6 aggregator (links + shops, best-effort)
     regulations/        # State regulations helpers (Step 7)
 middleware.ts           # Supabase session refresh + route protection
 supabase/
@@ -73,7 +79,7 @@ Migration `002` moved to a granular gear model: `flies` are first-class rows (fl
 3. ✅ USGS + Weather + Geolocation API integrations with typed wrappers
 4. ✅ Agentic planner (Claude tool-use agent orchestrating all data sources + gear profile)
 5. ✅ Spot Finder map with live condition overlays + gear match indicators
-6. Local shop/guide info: live report-link search + nearby fly shop directory (map/POI query) — no user submissions, no curated source list, no new table
+6. ✅ Local shop/guide info: live report-link search + nearby fly shop directory (map/POI query) — no user submissions, no curated source list, no new table
 7. Regulations dashboard
 
 ## Non-Negotiables (from spec)
@@ -84,9 +90,9 @@ Migration `002` moved to a granular gear model: `flies` are first-class rows (fl
 - Trip gear overrides must never mutate the saved profile
 - All API keys in `.env.local`, never hardcoded
 
-## Stage 6 Design Notes (planned 2026-07-04, not yet built)
+## Stage 6 Design Notes (planned 2026-07-04, built 2026-07-05)
 
-Stage 6 was rescoped from "user-submitted community reports" to two independent, ephemeral pieces. Design decided this session, to apply when Stage 6 is actually implemented:
+Stage 6 was rescoped from "user-submitted community reports" to two independent, ephemeral pieces. Built as designed — see "Session Decisions Log — Stage 6" for implementation decisions and deviations:
 
 ### 6a. Report Links (live web search)
 - **No new table, no persistence.** Results are ephemeral like planner itineraries and Spot Finder results. `catch_reports` stays dormant (see Database section) — do not repurpose it.
@@ -478,3 +484,51 @@ Red (much below) → orange → green (normal) → sky → blue (much above); sl
 - Middleware deviation note corrected (was still claiming only `/dashboard` is guarded).
 
 **Deferred past Stage 5 (reviewed, intentionally not built):** weather overlay on the map (planner's job; no spot-finder non-negotiable requires it), `leaders.tippet_x` in the matcher (marginal next to `tippet_spools`), reading-staleness timestamps, spot-list sorting, dashboard card color, route param-parsing tests.
+
+## Session Decisions Log — Stage 6 (Local Shop/Guide Info)
+
+### Architectural Decisions
+
+**Brave Search API powers 6a (user's choice over the Anthropic web_search tool)**
+`src/lib/reports/` wraps Brave web search (`BRAVE_SEARCH_API_KEY`, base URL overridable via `BRAVE_SEARCH_BASE_URL`). The key is optional by design: missing key ⇒ `null` ⇒ UI shows nothing (the /reports page says "unavailable"). Query is `<place> <admin1> fly fishing report`, `country=us`, 10 fetched → denylist/normalize → capped at 6.
+
+**Stage 6 wrappers never throw — a deliberate break from the Step 3 convention**
+Step 3 wrappers throw on failure "so the agent surfaces it." Stage 6's non-negotiable is the opposite: non-blocking, best-effort, degrade silently. Both wrappers catch everything and return `null`. Convention: `null` = lookup unavailable/failed (show nothing), `[]` = ran and found nothing. Callers can rely on `getLocalInfo` (the `src/lib/local-info.ts` aggregator shared by `/api/spots`, `/api/reports`, and the planner route) never throwing.
+
+**6a geographic scoping rides the query string, not a bbox**
+A web search API can't take the streamflow bounding box, so the constraint is carried by the resolved place + admin1 from the session's existing geocode (never a second geocoding call — candidate re-searches pass `place`/`admin1` params through). The other 6a guardrails as designed: bounded fields only (title/url/source/date/snippet, snippet stripped of inline HTML and capped at 280 chars), stale flag when >14 days or undated, region-mention relevance that sorts-but-never-drops, seed denylist in `DENYLIST` (grown reactively).
+
+**6b uses the Mapbox Search Box CATEGORY endpoint (`/category/fishing_store`), not forward text search**
+Verified live: forward `?q=fly fishing shop&types=poi&proximity=…` ranks by text relevance — it returned shops in Idaho and Slovenia for an Ennis, MT search (proximity only biases). The category browse is proximity-driven and returned exactly the Madison-valley shops, with `metadata.phone`/`metadata.website` present. `fishing_store` is the closest canonical category (no fly-specific one exists); radius is enforced by a haversine post-filter, not an API param. The public `NEXT_PUBLIC_MAPBOX_TOKEN` is reused server-side — no new key.
+
+**Planner integration is a side-channel, NOT a model tool**
+`ToolContext.getLocalInfo` (optional) is fired once per run by `agent.ts` after the first successful `geocode_place` (the `correctionUsed` one-shot pattern), runs concurrently with the model's remaining turns, and is emitted as a `local_info` PlannerEvent straight to the UI at finish time — the model never sees the results. That guarantees two things at once: report links can't feed itinerary reasoning (spec: "never parsed into ranking"), and the prompt-injection surface of scraped web content inside the agent is zero. At finish, a bounded residual wait (`LOCAL_INFO_GRACE_MS`, 4s) races the promise; not done in time ⇒ skipped silently. Because the hook is optional, the existing `agent.test.ts` suite runs unchanged with no network.
+
+**Shared renderer in `src/components/LocalInfoPanel.tsx` (first shared-components file)**
+Spot Finder, planner, and /reports all render the same sections. Report links are always attributed ("According to *source*, posted *date*"), stale results get an amber "may be stale — verify before relying on it" badge, and anchors carry `rel="noopener noreferrer nofollow"` — the app never vouches for the destination.
+
+**Standalone /reports page**
+`/api/reports` mirrors the /api/spots param/candidate-disambiguation pattern; the page gives the feature a home outside a planner/spot session. `/reports` added to middleware `PROTECTED_PREFIXES`; dashboard got a fourth card.
+
+### Deviations from Spec
+
+- **Regional sections, not per-pin content** — the spec's Spot Finder section imagines report links + a shop entry on each map pin. The search is one-shot per session and regional by design (same bbox as streamflow), so results render as two sections below the spot list instead of per-pin (a per-pin version would need per-spot searches, contradicting the one-shot rule). 6b's own spec line ("no dedicated UI required") supports this.
+- **Structure additions** — `src/lib/reports/`, `src/lib/shops/`, `src/lib/local-info.ts`, `src/components/` (documented in Project Structure now).
+- **Stage 6 wrappers return null instead of throwing** — see decision above.
+
+### Known Gotchas — Stage 6
+
+**Mapbox Search Box: forward ≠ category** — forward text search treats `proximity` as a ranking bias, not a filter; a query like "fly fishing shop" happily returns text-relevant POIs on other continents. Category search (`/category/<canonical_id>`) is the proximity-driven one. Symptom of the wrong endpoint: HTTP 200 with results that all fail your radius filter ⇒ a silently empty list that looks like "no shops here." If a POI feature is empty where it obviously shouldn't be, check the endpoint before blaming the data.
+
+**Vitest doesn't load `.env.local`** — a live smoke that needs a real key/token must parse `.env.local` itself (or export the var). Same run-once-and-delete convention as Stage 5; PowerShell `;` chaining conveniently still deletes the file when the test fails.
+
+**Brave descriptions contain inline HTML** — `<strong>` tags and entities arrive in `description`; strip/decode before display (`stripHtml`). The publication date lives in `page_age` (ISO), not `age` (human-readable relative). NOTE: 6a is built against Brave's documented response shape but has not run live yet — no key. Smoke it once the key lands in `.env.local`.
+
+**Public env vars are readable server-side** — `NEXT_PUBLIC_MAPBOX_TOKEN` works fine in a route handler / lib called server-side; no separate server token needed for the POI query.
+
+### Stage 6 Revisions (post-review hardening)
+
+- **URL scheme validation on all outbound hrefs** — report-link URLs and shop `website` values are external data landing in `<a href>`, and React does not sanitize `javascript:` hrefs. Both normalizers now reject anything that isn't http(s). The denylist keys off the URL's **real parsed host**, not `meta_url.hostname` (engine metadata is display-only and could disagree with the destination).
+- **Dedupe in both normalizers** — Mapbox returned the same shop as two POI records in the live probe (identical name, different `mapbox_id`s, coordinates meters apart); shops dedupe by lowercased name keeping the nearest, links dedupe by URL. Ordering matters: the links dedupe runs *after* the denylist so a denylisted record can't shadow a legitimate same-URL result.
+- **`retries: 0` on both Stage 6 wrappers** — `/api/spots` awaits `getLocalInfo` in its `Promise.all`, so with a retry a hung upstream would add ~16.5s of tail latency to the spot search; one attempt caps it at a single 8s timeout (normally hidden behind the slower USGS call). Also matches the design's "one attempt per session" language.
+- **Grace timer in `agent.ts` is cleared** after the finish-time race so a resolved lookup doesn't leave a stray 4s timeout keeping the event loop alive.

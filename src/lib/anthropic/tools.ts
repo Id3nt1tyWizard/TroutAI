@@ -17,6 +17,7 @@ import { getForecast } from '@/lib/weather'
 import { getStreamConditions } from '@/lib/usgs'
 import { getHatches } from '@/lib/hatches'
 import type { FullGearProfile } from '@/types/database'
+import type { LocalInfo, LocalInfoQuery } from '@/lib/local-info'
 
 /**
  * Context the executor needs that can't live in this module — chiefly the
@@ -25,6 +26,15 @@ import type { FullGearProfile } from '@/types/database'
  */
 export interface ToolContext {
   getGearProfile: () => Promise<FullGearProfile | null>
+  /**
+   * Stage 6 side-channel, NOT a model tool: the agent fires this once per run
+   * after the first successful geocode and surfaces the results straight to
+   * the UI as untrusted display data — the model never sees them (report
+   * links must not feed itinerary reasoning, and this keeps the
+   * prompt-injection surface at zero). Optional so unit tests without it
+   * simply skip the lookup.
+   */
+  getLocalInfo?: (query: LocalInfoQuery) => Promise<LocalInfo>
 }
 
 /** Result of running one tool — `isError` drives the `is_error` flag on the tool_result. */

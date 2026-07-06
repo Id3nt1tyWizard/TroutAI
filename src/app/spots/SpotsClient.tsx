@@ -6,6 +6,7 @@ import Map, { Marker, NavigationControl, Popup, type MapRef } from 'react-map-gl
 import 'mapbox-gl/dist/mapbox-gl.css'
 import type { PlaceCandidate, SpotResult, SpotsResponse } from '@/app/api/spots/route'
 import type { MatchFinding, MatchStatus } from '@/lib/gear/matching'
+import LocalInfoPanel from '@/components/LocalInfoPanel'
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN
 
@@ -123,14 +124,16 @@ export default function SpotsClient() {
 
   /** Re-search at a specific geocode candidate ("no, I meant Ennis, Montana"). */
   function searchAt(c: PlaceCandidate) {
-    runSearch(
-      new URLSearchParams({
-        lat: String(c.latitude),
-        lon: String(c.longitude),
-        radius: String(radius),
-      }),
-      { name: c.name, admin1: c.admin1 }
-    )
+    const params = new URLSearchParams({
+      lat: String(c.latitude),
+      lon: String(c.longitude),
+      radius: String(radius),
+      // Carried along so the report-link search can scope by name without a
+      // second geocode — the coord path otherwise has no place to search on.
+      place: c.name,
+    })
+    if (c.admin1) params.set('admin1', c.admin1)
+    runSearch(params, { name: c.name, admin1: c.admin1 })
   }
 
   return (
@@ -359,6 +362,14 @@ export default function SpotsClient() {
             ))}
           </ul>
         </section>
+      )}
+
+      {/* Stage 6 local info — best-effort extras; absent sections mean the
+          lookup found nothing or was unavailable, never an error state. */}
+      {data && (
+        <div className="mt-6">
+          <LocalInfoPanel links={data.reportLinks} shops={data.flyShops} />
+        </div>
       )}
     </main>
   )
